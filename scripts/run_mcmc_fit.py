@@ -136,7 +136,7 @@ def run_mcmc():
         )
         center_point = opt_res.x if (opt_res.success and prob_wrapper.log_prior(opt_res.x) > -1e10) else midpoint_guess
 
-        # Prior 유효 중심점 탐색 (워커 초기화 교착 차단)
+        # Prior 유효 중심점 탐색
         valid_center = center_point.copy()
         if prob_wrapper.log_prior(valid_center) <= -1e10:
             for _ in range(20000):
@@ -200,7 +200,7 @@ def run_mcmc():
             "days": days, "label": label, "wave": wave, "flux": flux, "x_fit": x_fit, "model_fit": model_fit
         })
 
-    # 플롯 생성 없이 순수 데이터 파일만 즉시 저장
+    # 데이터 파일 저장
     with open(os.path.join(base_dir, 'spectra_data.json'), 'w') as f:
         json.dump(make_serializable(spectra_data), f)
     with open(os.path.join(base_dir, 'labels_dict.json'), 'w') as f:
