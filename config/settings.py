@@ -17,10 +17,10 @@ LAM_SR_10914_AA = 10914.887
 LAM_HE_10833_AA = 10833.3  # He I 2^3S - 2^3P
 
 fit_cases = [
-    {"case_id": "Case1_noLTT_PureLTE", "use_nlte": False, "use_he": False},
-    {"case_id": "Case2_withLTT_PureLTE", "use_nlte": False, "use_he": True},
-    {"case_id": "Case3_noLTT_NLTE_He", "use_nlte": True, "use_he": False},
-    {"case_id": "Case4_withLTT_NLTE_He", "use_nlte": True, "use_he": True},
+    {"case_id": "Case1_noLTT_PureLTE", "use_ltt": False, "use_nlte": False, "use_he": False},
+    {"case_id": "Case2_withLTT_PureLTE", "use_ltt": True,  "use_nlte": False, "use_he": False},
+    {"case_id": "Case3_noLTT_NLTE_He",  "use_ltt": False, "use_nlte": True,  "use_he": True},
+    {"case_id": "Case4_withLTT_NLTE_He", "use_ltt": True,  "use_nlte": True,  "use_he": True},
 ]
 
 phases_template = [
