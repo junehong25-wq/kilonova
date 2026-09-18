@@ -19,7 +19,7 @@ class MCMCProbabilityWrapper(object):
         for val, (low, high) in zip(theta, self.bounds):
             if not (low <= val <= high):
                 return -np.inf
-        # 유체역학적 제약조건 (광구 속도는 분출물 최외각 속도 미만이어야 함)
+        # 유체역학적 제약조건 (광구 속도는 분출물 최외각 속도 미만)
         if vphot >= vmax - 0.005 or ve <= 0.001 or tau <= 0.001 or N_29 <= 0.0:
             return -np.inf
         return 0.0
