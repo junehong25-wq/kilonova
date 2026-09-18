@@ -36,7 +36,7 @@ def plot_all_results():
         if not os.path.exists(res_json):
             continue
 
-        print(f"\n--> [{case_id}] 9D/7D 호환 물리 정규화 기반 플롯 일괄 생성 시작...")
+        print(f"\n--> [{case_id}] 9D/7D 호환 물리 정규화 기반 플롯 생성...")
 
         with open(res_json, 'r') as f:
             results_summary = json.load(f)
@@ -45,7 +45,7 @@ def plot_all_results():
         with open(lbl_json, 'r') as f:
             labels_dict = json.load(f)
 
-        # 1. 코너 플롯 (분산 0 고착 에러 방지 처리)
+        # 1. 코너 플롯
         for sdata in spectra_data:
             days = sdata["days"]
             samples_path = os.path.join(target_save_dir, f"samples_{days:.3f}d.npy")
@@ -72,7 +72,7 @@ def plot_all_results():
                     fig.savefig(os.path.join(target_save_dir, f"Corner_Phase_{days:.2f}d.png"), dpi=200)
                     plt.close(fig)
                 except Exception as e:
-                    print(f"    [참고] {days:.2f}d 코너 플롯 생성 생략 (고착된 파라미터 존재: {e})")
+                    print(f"    [참고] {days:.2f}d 코너 플롯 생성 생략 ({e})")
 
         # 2. 개별 Spectrum Fit & Line Profile
         for idx, sdata in enumerate(spectra_data):
@@ -82,7 +82,7 @@ def plot_all_results():
             flux = np.array(sdata["flux"])
             t_ph = days * 86400.0
 
-            # 7D / 9D 파라미터 명칭 안전 호환 (KeyError 차단)
+            # 7D / 9D 파라미터 명칭 호환
             tau_val = float(popt.get("tau", popt.get("tau_sr", 1.5)))
             ve_val = float(popt.get("ve", 0.35))
             trans_val = float(popt.get("trans", 0.5))
@@ -90,7 +90,7 @@ def plot_all_results():
             amp2_val = float(popt.get("amp2", 0.40))
             dl_val = float(results_summary[idx].get("dl_med", 40.0))
 
-            # (1) 개별 스펙트럼 핏
+            # 개별 스펙트럼 핏
             model_flux = planck_with_mod_full_relativistic(
                 wave, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
                 tau=tau_val, trans=trans_val, ve=ve_val,
