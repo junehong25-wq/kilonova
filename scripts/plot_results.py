@@ -19,8 +19,10 @@ except ImportError:
 
 def plot_all_results():
     base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_results")
-    case_folders = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+    if not os.path.exists(base_dir):
+        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_results")
 
+    case_folders = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
     if not case_folders:
         print("output_results 내에 피팅 결과 폴더가 없습니다.")
         return
@@ -34,7 +36,7 @@ def plot_all_results():
         if not os.path.exists(res_json):
             continue
 
-        print(f"\n--> [{case_id}] 9D 물리 정규화 기반 플롯 일괄 생성 시작...")
+        print(f"\n--> [{case_id}] 9D/7D 호환 물리 정규화 기반 플롯 일괄 생성 시작...")
 
         with open(res_json, 'r') as f:
             results_summary = json.load(f)
@@ -43,18 +45,34 @@ def plot_all_results():
         with open(lbl_json, 'r') as f:
             labels_dict = json.load(f)
 
-        # 1. 코너 플롯 재생성
+        # 1. 코너 플롯 (분산 0 고착 에러 방지 처리)
         for sdata in spectra_data:
             days = sdata["days"]
             samples_path = os.path.join(target_save_dir, f"samples_{days:.3f}d.npy")
             if os.path.exists(samples_path) and corner is not None:
                 samples = np.load(samples_path)
-                fig = corner.corner(
-                    samples, labels=labels_dict["corner_labels"],
-                    quantiles=[0.16, 0.50, 0.84], show_titles=True, title_fmt=".3f"
-                )
-                fig.savefig(os.path.join(target_save_dir, f"Corner_Phase_{days:.2f}d.png"), dpi=200)
-                plt.close(fig)
+                try:
+                    safe_ranges = []
+                    for col_idx in range(samples.shape[1]):
+                        col_data = samples[:, col_idx]
+                        ptp_val = np.ptp(col_data)
+                        med_val = np.median(col_data)
+                        if ptp_val < 1e-5:
+                            span_pad = max(abs(med_val) * 0.05, 0.01)
+                            safe_ranges.append((med_val - span_pad, med_val + span_pad))
+                        else:
+                            safe_ranges.append(0.999)
+
+                    fig = corner.corner(
+                        samples, labels=labels_dict.get("corner_labels", None),
+                        range=safe_ranges,
+                        quantiles=[0.16, 0.50, 0.84], show_titles=True, title_fmt=".3f",
+                        plot_contours=False
+                    )
+                    fig.savefig(os.path.join(target_save_dir, f"Corner_Phase_{days:.2f}d.png"), dpi=200)
+                    plt.close(fig)
+                except Exception as e:
+                    print(f"    [참고] {days:.2f}d 코너 플롯 생성 생략 (고착된 파라미터 존재: {e})")
 
         # 2. 개별 Spectrum Fit & Line Profile
         for idx, sdata in enumerate(spectra_data):
@@ -64,16 +82,24 @@ def plot_all_results():
             flux = np.array(sdata["flux"])
             t_ph = days * 86400.0
 
+            # 7D / 9D 파라미터 명칭 안전 호환 (KeyError 차단)
+            tau_val = float(popt.get("tau", popt.get("tau_sr", 1.5)))
+            ve_val = float(popt.get("ve", 0.35))
+            trans_val = float(popt.get("trans", 0.5))
+            amp1_val = float(popt.get("amp1", 0.20))
+            amp2_val = float(popt.get("amp2", 0.40))
+            dl_val = float(results_summary[idx].get("dl_med", 40.0))
+
             # (1) 개별 스펙트럼 핏
             model_flux = planck_with_mod_full_relativistic(
                 wave, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
-                tau=popt["tau"], trans=popt["trans"], ve=popt["ve"],
-                amp1=popt["amp1"], amp2=popt["amp2"], t0=t_ph
+                tau=tau_val, trans=trans_val, ve=ve_val,
+                amp1=amp1_val, amp2=amp2_val, t0=t_ph
             )
             fig, ax = plt.subplots(figsize=(10, 6))
             ax.plot(wave, flux, color="lightgray", label="Data", lw=1.0)
             ax.plot(wave, model_flux, color="crimson", lw=2.0,
-                    label=rf"+{days:.2f}d Fit: $D_L={results_summary[idx]['dl_med']:.1f}\mathrm{{Mpc}}$, $\tau={popt['tau']:.2f}$")
+                    label=rf"+{days:.2f}d Fit: $D_L={dl_val:.1f}\mathrm{{Mpc}}$, $\tau={tau_val:.2f}$")
             ax.set_xlabel(r"Rest Wavelength [$\AA$]", fontsize=12)
             ax.set_ylabel(r"Flux [$erg/s/cm^2/\AA$]", fontsize=12)
             ax.set_title(f"AT2017gfo Spectrum Fit (+{days:.2f}d) [{case_id}]", fontsize=13, fontweight="bold")
@@ -83,34 +109,36 @@ def plot_all_results():
             plt.savefig(os.path.join(target_save_dir, f"Plot1_Spectrum_Fit_{days:.2f}d.png"), dpi=200)
             plt.close(fig)
 
-            # (2) 개별 라인 프로파일 (물리 연속광 F_cont 정규화)
-            mask_zoom = (wave >= 9500) & (wave <= 12500)
+            # (2) 개별 라인 프로파일 (7000 ~ 12500 Å 물리 연속광 정규화)
+            mask_zoom = (wave >= 7000) & (wave <= 12500)
             w_zoom, f_zoom = wave[mask_zoom], flux[mask_zoom]
             cont_zoom = (popt["N_29"] * 1e-29) * calc_relativistic_blackbody_continuum(w_zoom, popt["T_prime"], popt["vphot"])
 
-            norm_obs = f_zoom / cont_zoom
+            norm_obs = f_zoom / np.maximum(cont_zoom, 1e-35)
             norm_occulted = planck_with_mod_full_relativistic(
                 w_zoom, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
-                tau=popt["tau"], trans=popt["trans"], ve=popt["ve"], amp1=popt["amp1"], amp2=popt["amp2"], t0=t_ph
-            ) / cont_zoom
+                tau=tau_val, trans=trans_val, ve=ve_val, amp1=amp1_val, amp2=amp2_val, t0=t_ph
+            ) / np.maximum(cont_zoom, 1e-35)
 
             norm_no_occult = planck_with_mod_full_relativistic(
                 w_zoom, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
-                tau=popt["tau"], trans=1.0, ve=popt["ve"], amp1=popt["amp1"], amp2=popt["amp2"], t0=t_ph
-            ) / cont_zoom
+                tau=tau_val, trans=1.0, ve=ve_val, amp1=amp1_val, amp2=amp2_val, t0=t_ph
+            ) / np.maximum(cont_zoom, 1e-35)
 
             fig, ax = plt.subplots(figsize=(10, 6))
+            ax.axvspan(9950, 10250, color="lightgray", alpha=0.3, label="Masked Region")
             ax.plot(w_zoom, norm_obs, color="lightgray", lw=1.2, label="Normalized Observed Data")
-            ax.plot(w_zoom, norm_occulted, color="teal", lw=2.2, label=rf"Best-fit Profile ($\mathrm{{trans}}={popt['trans']:.2f}$)")
+            ax.plot(w_zoom, norm_occulted, color="teal", lw=2.2, label=rf"Best-fit Profile ($\mathrm{{trans}}={trans_val:.2f}$)")
             ax.plot(w_zoom, norm_no_occult, color="darkorange", ls="--", lw=2.0, label=r"Standard Line ($\mathrm{trans}=1.0$)")
             ax.axhline(1.0, color="black", ls=":", label="Normalized Continuum (1.0)")
-            ax.axvline(10914.89, color="royalblue", ls=":", label=r"Rest $\mathrm{Sr\ II}$")
-            ax.set_xlim(9500, 12500)
-            ax.set_ylim(0.4, 2.0)
+            ax.axvline(10327.311, color="navy", ls="-.", alpha=0.6, label=r"Rest $\mathrm{Sr\ II}$")
+            ax.axvline(10833.3, color="darkgreen", ls="-.", alpha=0.6, label=r"Rest $\mathrm{He\ I}$")
+            ax.set_xlim(7000, 12500)
+            ax.set_ylim(0.4, 2.2)
             ax.set_xlabel(r"Rest Wavelength [$\AA$]", fontsize=12)
             ax.set_ylabel(r"Normalized Flux ($F_{\lambda}/F_{\text{cont}}$)", fontsize=12)
             ax.set_title(f"Sr II Line Profile (+{days:.2f}d) [{case_id}]", fontsize=13, fontweight="bold")
-            ax.legend(loc="upper right")
+            ax.legend(loc="upper right", fontsize=9)
             ax.grid(True, alpha=0.3)
             plt.tight_layout()
             plt.savefig(os.path.join(target_save_dir, f"Plot2_Line_Profile_{days:.2f}d.png"), dpi=200)
