@@ -184,7 +184,7 @@ def planck_with_mod_full_relativistic(
     pcyg_prof5 = p_cygni_line_corr_rel_1d(wav, vmax, vphot, (4.7 / 13.8) * tau, 10914.887, ve, t0)
     correction = pcyg_prof3 * pcyg_prof4 * pcyg_prof5
 
-    # [핵심]: 순수 방출 영역(> 1.0)에만 trans(은폐 인자) 적용
+    # 방출 영역에만 trans(은폐 인자) 적용
     mask_emission = correction > 1.0
     correction[mask_emission] = (correction[mask_emission] - 1.0) * trans + 1.0
 
