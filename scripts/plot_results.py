@@ -1,9 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""
+scripts/plot_results.py
+MCMC 결과 시각화 스크립트 (Headless 서버 환경 최적화)
+"""
+
 import os
+import sys
 import json
 import numpy as np
+
+# 1. 실행 위치에 구애받지 않도록 프로젝트 루트 경로 자동 등록
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# 2. 리눅스 서버 Headless (No GUI) 디스플레이 백엔드 강제 설정
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.models import (
@@ -18,9 +33,10 @@ except ImportError:
 
 
 def plot_all_results():
-    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_results")
+    base_dir = os.path.join(PROJECT_ROOT, "output_results")
     if not os.path.exists(base_dir):
-        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_results")
+        print(f"[경고] 결과 폴더를 찾을 수 없습니다: {base_dir}")
+        return
 
     case_folders = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
     if not case_folders:
@@ -36,7 +52,7 @@ def plot_all_results():
         if not os.path.exists(res_json):
             continue
 
-        print(f"\n--> [{case_id}] 9D/7D 호환 물리 정규화 기반 플롯 생성...")
+        print(f"\n--> [{case_id}] 플롯 생성 시작 (Headless Agg Mode)...")
 
         with open(res_json, 'r') as f:
             results_summary = json.load(f)
@@ -45,7 +61,9 @@ def plot_all_results():
         with open(lbl_json, 'r') as f:
             labels_dict = json.load(f)
 
-        # 1. 코너 플롯
+        # -------------------------------------------------------------
+        # 1. 코너 플롯 (Corner Plot)
+        # -------------------------------------------------------------
         for sdata in spectra_data:
             days = sdata["days"]
             samples_path = os.path.join(target_save_dir, f"samples_{days:.3f}d.npy")
@@ -71,10 +89,13 @@ def plot_all_results():
                     )
                     fig.savefig(os.path.join(target_save_dir, f"Corner_Phase_{days:.2f}d.png"), dpi=200)
                     plt.close(fig)
+                    print(f"    [완료] Corner_Phase_{days:.2f}d.png")
                 except Exception as e:
                     print(f"    [참고] {days:.2f}d 코너 플롯 생성 생략 ({e})")
 
+        # -------------------------------------------------------------
         # 2. 개별 Spectrum Fit & Line Profile
+        # -------------------------------------------------------------
         for idx, sdata in enumerate(spectra_data):
             days = sdata["days"]
             popt = results_summary[idx]["popt"]
@@ -82,7 +103,6 @@ def plot_all_results():
             flux = np.array(sdata["flux"])
             t_ph = days * 86400.0
 
-            # 7D / 9D 파라미터 명칭 호환
             tau_val = float(popt.get("tau", popt.get("tau_sr", 1.5)))
             ve_val = float(popt.get("ve", 0.35))
             trans_val = float(popt.get("trans", 0.5))
@@ -90,7 +110,7 @@ def plot_all_results():
             amp2_val = float(popt.get("amp2", 0.40))
             dl_val = float(results_summary[idx].get("dl_med", 40.0))
 
-            # 개별 스펙트럼 핏
+            # (1) 개별 스펙트럼 전체 피팅 플롯
             model_flux = planck_with_mod_full_relativistic(
                 wave, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
                 tau=tau_val, trans=trans_val, ve=ve_val,
@@ -126,7 +146,7 @@ def plot_all_results():
             ) / np.maximum(cont_zoom, 1e-35)
 
             fig, ax = plt.subplots(figsize=(10, 6))
-            ax.axvspan(9950, 10250, color="lightgray", alpha=0.3, label="Masked Region")
+            # 마스킹이 해제되었으므로 불필요한 회색 axvspan 블록 제거
             ax.plot(w_zoom, norm_obs, color="lightgray", lw=1.2, label="Normalized Observed Data")
             ax.plot(w_zoom, norm_occulted, color="teal", lw=2.2, label=rf"Best-fit Profile ($\mathrm{{trans}}={trans_val:.2f}$)")
             ax.plot(w_zoom, norm_no_occult, color="darkorange", ls="--", lw=2.0, label=r"Standard Line ($\mathrm{trans}=1.0$)")
@@ -144,7 +164,7 @@ def plot_all_results():
             plt.savefig(os.path.join(target_save_dir, f"Plot2_Line_Profile_{days:.2f}d.png"), dpi=200)
             plt.close(fig)
 
-        print(f"--> [성공] [{case_id}] 전체 플롯 렌더링 완료!")
+        print(f"--> [성공] [{case_id}] 모든 플롯 PNG 저장 완료!")
 
 
 if __name__ == "__main__":
