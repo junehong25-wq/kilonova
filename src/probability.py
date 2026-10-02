@@ -3,78 +3,146 @@
 
 """
 src/probability.py
-기하학적 trans 제약이 적용된 순수 복사전달 MCMC 확률 밀도 래퍼
+MCMC 베이즈 사후확률 (Log-Posterior), 우도 (Likelihood), 물리 사전분포 (Prior)
+MCMCProbabilityWrapper 클래스 및 초기 최적화용 chi2_for_minimizer 구현
 """
 
 import numpy as np
-from src.models import planck_with_mod_full_relativistic, lum_dist_arr
+from src.models import planck_with_mod_full_relativistic
+
+C_KMS = 299792.458
 
 
-class MCMCProbabilityWrapper(object):
-    def __init__(self, x_fit, y_fit, err_fit, time_s, bounds=None, n_days=1.427, use_ltt=False, use_nlte=False, **kwargs):
-        self.x_fit = x_fit
-        self.y_fit = y_fit
-        self.err_fit = err_fit
-        self.time_s = time_s
-        self.bounds = bounds
-        self.n_days = n_days
-        self.use_ltt = use_ltt
-        self.use_nlte = use_nlte
+def lum_dist_arr(N_29, vphot, n_days):
+    """
+    EPM 팽창광구법 기반 광도 거리 D_L [Mpc] 계산 (배열 및 스칼라 지원)
+    """
+    N_29 = np.asarray(N_29, dtype=np.float64)
+    vphot = np.asarray(vphot, dtype=np.float64)
+
+    theta_rad = 2.0 * np.sqrt(5.48e6 * np.maximum(N_29, 1e-30) * 1e-29)
+    r_phot_cm = vphot * (C_KMS * 1e5) * (n_days * 86400.0)
+    d_cm = (2.0 * r_phot_cm) / np.maximum(theta_rad, 1e-30)
+    dl_mpc = d_cm / 3.08567758149e24
+
+    if dl_mpc.ndim == 0:
+        return float(dl_mpc)
+    return dl_mpc
+
+
+def lum_dist_mpc(N_29, vphot, n_days):
+    """lum_dist_arr 별칭 함수"""
+    return lum_dist_arr(N_29, vphot, n_days)
+
+
+class MCMCProbabilityWrapper:
+    """
+    MCMC 샘플러(emcee) 및 scipy.optimize용 확률 래퍼 클래스
+    """
+    def __init__(
+        self,
+        wave,
+        flux,
+        err,
+        time_s=None,
+        bounds=None,
+        n_days=None,
+        use_ltt=True,
+        use_nlte=False,
+        **kwargs
+    ):
+        self.wave = np.asarray(wave, dtype=np.float64)
+        self.flux = np.asarray(flux, dtype=np.float64)
+        self.err = np.asarray(err, dtype=np.float64)
+
+        if n_days is not None:
+            self.n_days = float(n_days)
+            self.t0 = self.n_days * 86400.0
+        elif time_s is not None:
+            self.t0 = float(time_s)
+            self.n_days = self.t0 / 86400.0
+        else:
+            self.n_days = 1.5
+            self.t0 = 1.5 * 86400.0
+
+        if bounds is not None:
+            self.bounds = bounds
+        else:
+            self.bounds = [
+                (1800.0, 7500.0),  # T_prime [K]
+                (0.1, 15.0),       # N_29
+                (0.25, 0.45),      # vmax
+                (0.15, 0.32),      # vphot
+                (0.1, 15.0),       # tau
+                (0.50, 1.50),      # trans
+                (0.05, 0.50),      # ve
+                (0.0, 0.80),       # amp1
+                (0.0, 0.80)        # amp2
+            ]
+
+        self.use_ltt = bool(use_ltt)
+        self.use_nlte = bool(use_nlte)
 
     def log_prior(self, theta):
-        if np.any(np.isnan(theta)) or np.any(np.isinf(theta)):
+        """사전분포: 파라미터 경계 및 광도 거리 가우시안 사전분포"""
+        for val, (b_low, b_high) in zip(theta, self.bounds):
+            if val < b_low or val > b_high:
+                return -np.inf
+
+        T_p, N_29, vmax, vphot, tau, trans, ve, amp1, amp2 = theta
+
+        if vphot >= vmax:
             return -np.inf
 
-        T_prime, N_29, vmax, vphot, tau, trans, ve, amp1, amp2 = theta
-
-        if self.bounds is not None:
-            for val, (low, high) in zip(theta, self.bounds):
-                if not (low <= val <= high):
-                    return -np.inf
-        else:
-            if T_prime <= 500.0 or T_prime > 40000.0: return -np.inf
-            if N_29 <= 1e-4 or N_29 > 100.0: return -np.inf
-            if vphot <= 0.01 or vmax >= 0.99: return -np.inf
-            if tau <= 0.001 or tau > 50.0: return -np.inf
-            # 기하학적 차폐 인자 물리적 범위 (0.50 ~ 1.50)
-            if trans < 0.50 or trans > 1.50: return -np.inf
-            if ve <= 0.001 or ve > 0.90: return -np.inf
-            if amp1 < 0.0 or amp1 > 5.0 or amp2 < 0.0 or amp2 > 5.0: return -np.inf
-
-        if vphot >= vmax - 0.005 or ve <= 0.001 or tau <= 0.001 or N_29 <= 0.0 or trans < 0.50 or trans > 1.50:
+        # 초기 추정치가 갇히지 않도록 유효 탐색 폭(20 ~ 85 Mpc) 허용
+        dl = lum_dist_arr(N_29, vphot, self.n_days)
+        if dl < 20.0 or dl > 85.0:
             return -np.inf
 
-        # 모은하 광도 거리 Gaussian Prior (40.0 ± 4.0 Mpc)
-        dl = lum_dist_arr(np.array([N_29]), np.array([vphot]), n_days=self.n_days)[0]
-        lp_dl = -0.5 * ((dl - 40.0) / 4.0) ** 2
+        # NGC 4993 모은하 참값(40.7 Mpc) 중심 정규 사전분포
+        lp_dl = -0.5 * ((dl - 40.7) / 2.5) ** 2
         return lp_dl
 
     def log_likelihood(self, theta):
-        T_prime, N_29, vmax, vphot, tau, trans, ve, amp1, amp2 = theta
-        try:
-            model = planck_with_mod_full_relativistic(
-                wav=self.x_fit, T_prime=T_prime, N_29=N_29, vmax=vmax, vphot=vphot,
-                tau=tau, trans=trans, ve=ve, amp1=amp1, amp2=amp2, t0=self.time_s,
-                use_ltt=self.use_ltt, use_nlte=self.use_nlte
-            )
-            if np.any(np.isnan(model)) or np.any(np.isinf(model)) or np.any(model <= 0.0):
-                return -np.inf
+        """우도 함수"""
+        T_p, N_29, vmax, vphot, tau, trans, ve, amp1, amp2 = theta
 
-            total_chi2 = np.sum(((self.y_fit - model) / self.err_fit) ** 2)
-            return -0.5 * total_chi2
-        except Exception:
-            return -np.inf
+        model = planck_with_mod_full_relativistic(
+            self.wave, T_p, N_29, vmax, vphot,
+            tau=tau, trans=trans, ve=ve,
+            amp1=amp1, amp2=amp2, t0=self.t0,
+            use_ltt=self.use_ltt, use_nlte=self.use_nlte
+        )
 
-    def __call__(self, theta):
+        diff = (self.flux - model) / self.err
+        return -0.5 * np.sum(diff ** 2)
+
+    def log_probability(self, theta):
+        """사후확률 log P = log Prior + log Likelihood"""
         lp = self.log_prior(theta)
         if not np.isfinite(lp):
             return -np.inf
         ll = self.log_likelihood(theta)
-        return lp + ll if np.isfinite(ll) else -np.inf
+        if not np.isfinite(ll):
+            return -np.inf
+        return lp + ll
 
     def chi2_for_minimizer(self, theta):
+        """
+        scipy.optimize.minimize (Nelder-Mead)용 목적함수
+        MAP(최대 사후확률) 추정을 위해 -2 * log_post 반환
+        """
         lp = self.log_prior(theta)
         if not np.isfinite(lp):
-            return 1e12
+            return 1e30
         ll = self.log_likelihood(theta)
-        return -2.0 * ll if np.isfinite(ll) else 1e12
+        if not np.isfinite(ll):
+            return 1e30
+        return -2.0 * (lp + ll)
+
+    def __call__(self, theta):
+        return self.log_probability(theta)
+
+
+# 하위 호환성 별칭
+LogPost = MCMCProbabilityWrapper

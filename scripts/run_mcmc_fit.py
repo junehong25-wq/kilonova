@@ -3,7 +3,7 @@
 
 """
 scripts/run_mcmc_fit.py
-킬로노바 AT2017gfo MCMC 피팅 파이프라인 (Case 1 ~ 4 전체 일괄 실행)
+킬로노바 AT2017gfo MCMC 피팅 파이프라인 (2개 케이스: PureLTE vs NLTE, LTT 상시 적용)
 """
 
 import os
@@ -29,17 +29,16 @@ from src.data_loader import load_data
 
 warnings.filterwarnings("ignore")
 
+# [케이스 개편]: LTT 상시 적용 2개 케이스 체계
 CASE_LIST = [
-    "Case1_noLTT_PureLTE",
-    "Case2_withLTT_PureLTE",
-    "Case3_noLTT_NLTE",
-    "Case4_withLTT_NLTE"
+    "Case1_withLTT_PureLTE",
+    "Case2_withLTT_NLTE"
 ]
 
 
 def get_case_options(case_name):
     return {
-        "use_ltt": "withLTT" in case_name,
+        "use_ltt": True,  # LTT 상시 활성화
         "use_nlte": "NLTE" in case_name and "PureLTE" not in case_name
     }
 
@@ -64,10 +63,10 @@ def run_single_case(target_case):
     burn_in = 3000
     thin_step = 2
 
-    # trans를 기하학적 허용 범위(0.50 ~ 1.50)로 엄격히 제한
+    # trans를 기하학적 차폐 한계(0.50 ~ 1.50)로 엄격히 제한
     bounds = [
         (1000.0, 25000.0), # T_prime
-        (0.01, 50.0),      # N_29
+        (0.10, 20.0),      # N_29: D_L ~ 40 Mpc 대응 범위
         (0.15, 0.70),      # vmax
         (0.05, 0.55),      # vphot
         (0.01, 50.0),      # tau
@@ -77,6 +76,7 @@ def run_single_case(target_case):
         (0.00, 2.00)       # amp2
     ]
 
+    # 각 위상별 D_L ~ 40 Mpc에 물리적으로 부합하는 N_29 초기 추정값 설정
     phases = [
         {
             "label": "Phase +1.43d (OB1)",
@@ -84,7 +84,7 @@ def run_single_case(target_case):
             "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57983.969_Phase%2B1.43d_deredz.dat",
             "local_file": os.path.join(base_dir, "OB1_1.43d.dat"),
             "bounds": bounds,
-            "init_guess": [5000.0, 2.50, 0.38, 0.28, 3.0, 1.00, 0.18, 0.10, 0.35]
+            "init_guess": [5200.0, 1.80, 0.38, 0.28, 2.5, 1.00, 0.18, 0.10, 0.35]
         },
         {
             "label": "Phase +2.42d (OB2)",
@@ -92,7 +92,7 @@ def run_single_case(target_case):
             "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57984.969_Phase%2B2.42d_deredz.dat",
             "local_file": os.path.join(base_dir, "OB2_2.42d.dat"),
             "bounds": bounds,
-            "init_guess": [3400.0, 3.50, 0.33, 0.24, 2.5, 1.00, 0.20, 0.10, 0.25]
+            "init_guess": [3500.0, 3.80, 0.33, 0.24, 2.0, 1.00, 0.20, 0.10, 0.25]
         },
         {
             "label": "Phase +3.41d (OB3)",
@@ -100,7 +100,7 @@ def run_single_case(target_case):
             "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57985.974_Phase%2B3.41d_deredz.dat",
             "local_file": os.path.join(base_dir, "OB3_3.41d.dat"),
             "bounds": bounds,
-            "init_guess": [2900.0, 4.20, 0.26, 0.19, 2.0, 1.00, 0.20, 0.15, 0.35]
+            "init_guess": [2950.0, 4.20, 0.26, 0.19, 1.8, 1.00, 0.20, 0.15, 0.35]
         },
         {
             "label": "Phase +4.40d (OB4)",
@@ -108,7 +108,7 @@ def run_single_case(target_case):
             "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57986.974_Phase%2B4.40d_deredz.dat",
             "local_file": os.path.join(base_dir, "OB4_4.40d.dat"),
             "bounds": bounds,
-            "init_guess": [2650.0, 4.80, 0.22, 0.15, 1.5, 1.00, 0.18, 0.18, 0.30]
+            "init_guess": [2650.0, 5.50, 0.22, 0.15, 1.5, 1.00, 0.18, 0.18, 0.30]
         }
     ]
 
@@ -123,7 +123,7 @@ def run_single_case(target_case):
     spectra_data = []
 
     print("\n========================================================")
-    print(f" [가동 시작: {target_case}] (LTT={case_opts['use_ltt']}, NLTE={case_opts['use_nlte']})")
+    print(f" [가동 시작: {target_case}] (LTT=True, NLTE={case_opts['use_nlte']})")
     print("========================================================\n")
 
     for p_info in phases:
@@ -141,7 +141,7 @@ def run_single_case(target_case):
 
         prob_wrapper = MCMCProbabilityWrapper(
             x_fit, y_fit, err_fit, time_s, bnds, n_days=days,
-            use_ltt=case_opts["use_ltt"], use_nlte=case_opts["use_nlte"]
+            use_ltt=True, use_nlte=case_opts["use_nlte"]
         )
 
         opt_res = minimize(
@@ -195,7 +195,7 @@ def run_single_case(target_case):
         model_fit = planck_with_mod_full_relativistic(
             x_fit, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
             tau=popt["tau"], trans=popt["trans"], ve=popt["ve"], amp1=popt["amp1"], amp2=popt["amp2"], t0=time_s,
-            use_ltt=case_opts["use_ltt"], use_nlte=case_opts["use_nlte"]
+            use_ltt=True, use_nlte=case_opts["use_nlte"]
         )
         chi2_fit = np.sum(((y_fit - model_fit) / err_fit) ** 2)
         red_chi2_fit = chi2_fit / (len(x_fit) - ndim)

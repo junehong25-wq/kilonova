@@ -3,7 +3,8 @@
 
 """
 src/data_loader.py
-관측 분광 데이터 전처리 (Sr II 피쳐 중심 물리 대역: 7,000 ~ 13,500 Å)
+X-shooter 전 파장 대역 (3,500 ~ 22,500 Å) 분광 데이터 전처리
+(텔루릭 흡수대 및 UV 극한 노이즈 정밀 노치 마스킹)
 """
 
 import os
@@ -56,7 +57,12 @@ def load_data(url, local_filename="temp_spectrum.dat"):
     if wave.max() < 3000:
         wave = wave * 10.0
 
-    # [핵심]: 가시광선 블랭킷팅과 적외선 오버슈트의 간섭을 배제하고,
-    # Sobolev P-Cygni 라인이 지배하는 7,000 ~ 13,500 Å 핵심 영역만 추출
-    exc_reg = (wave >= 7000.0) & (wave <= 13500.0)
+    # [전 파장 대역 정규 피팅]: 3,500 ~ 22,000 Å 전역을 피팅하되,
+    # 지상 대기 수증기 텔루릭 흡수대 및 기기 경계 잡음 구간만 제외
+    exc_reg = (
+        (wave >= 3500.0) & (wave <= 22000.0)
+        & ~((wave > 13100.0) & (wave < 14400.0))  # 텔루릭 J/H 밴드 사이
+        & ~((wave > 17550.0) & (wave < 19200.0))  # 텔루릭 H/K 밴드 사이
+        & ~((wave > 5330.0) & (wave < 5740.0))    # 2일차 VIS/NIR 접합 노이즈
+    )
     return wave[exc_reg], flux[exc_reg], err[exc_reg]

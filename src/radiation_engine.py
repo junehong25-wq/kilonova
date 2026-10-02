@@ -3,115 +3,169 @@
 
 """
 src/radiation_engine.py
-LTT(빛 이동 시간) 및 NLTE 결합 복사전달 엔진 (수치 안정성 및 지연 시간 교정)
+상대론적 Sobolev 복사전달 엔진 (EATS 시공간 LTT 및 Comoving Frame 해석해)
+- 적색편이 영역(z < 0) 광구 앞면 연속광(I=1.0) 보존 로직 적용
+- 장파장 끝단에서 연속광(1.0)으로의 매끄러운 수렴 보장
 """
 
 import numpy as np
-import numba
 
-C_CGS = 29979245800.0
-
-
-@numba.njit(fastmath=True)
-def alpha_tau_evolution(t_days, use_nlte=True):
-    if not use_nlte:
-        return 1.0
-    if 1.5 < t_days <= 3.0:
-        return t_days / 1.5
-    elif 3.0 < t_days <= 5.0:
-        return 2.0 - 0.5 * (t_days - 3.0)
-    else:
-        return 1.0
+# 물리 상수
+C_KMS = 299792.458  # 광속 [km/s]
 
 
-@numba.njit(fastmath=True)
-def tau_powerlaw_anisotropic(r, mu, t_ph, R_phot, tau_base, beta_power=3.0, c=C_CGS, use_nlte=True):
-    if r < R_phot:
-        return 0.0
+def solve_resonant_z_vectorized(p_arr, lam_ratio, c_kms, t0_s):
+    """
+    상대론적 등진동수 공명면 z 좌표 계산 (벡터 연산)
+    lam_ratio = lambda_obs / lambda_0
+    """
+    A = lam_ratio ** 2
+    r_scale = c_kms * t0_s
+    beta_p = p_arr / r_scale
 
-    t_days = t_ph / 86400.0
-    alpha_t = alpha_tau_evolution(t_days, use_nlte=use_nlte)
-    tau_radial = tau_base * alpha_t * ((r / R_phot) ** (-beta_power))
+    # 2차 방정식 판별식: disc = 1 - (1+A)*[1 - A*(1 - beta_p^2)]
+    term = 1.0 - A * (1.0 - beta_p ** 2)
+    disc = 1.0 - (1.0 + A) * term
 
-    beta = (r / t_ph) / c
-    if beta >= 1.0:
-        return 1e10
+    valid_mask = disc >= 0.0
+    z_arr = np.full_like(p_arr, np.nan)
+    beta_z_arr = np.full_like(p_arr, np.nan)
+    beta_arr = np.full_like(p_arr, np.nan)
 
-    gamma = 1.0 / np.sqrt(1.0 - beta ** 2)
-    num = (1.0 + mu * beta) ** 2
-    den = gamma * (1.0 + mu * beta - (beta ** 2) * (1.0 - mu ** 2))
-    return 1e10 if den <= 0.0 else tau_radial * (num / den)
+    if np.any(valid_mask):
+        p_val = p_arr[valid_mask]
+        bp_val = beta_p[valid_mask]
+        disc_val = disc[valid_mask]
+
+        # 물리적 해 (부호: -)
+        bz = (1.0 - np.sqrt(disc_val)) / (1.0 + A)
+        b_sq = bp_val ** 2 + bz ** 2
+        phys_mask = b_sq < 1.0
+
+        if np.any(phys_mask):
+            idx = np.where(valid_mask)[0][phys_mask]
+            bz_phys = bz[phys_mask]
+            beta_z_arr[idx] = bz_phys
+            beta_arr[idx] = np.sqrt(b_sq[phys_mask])
+            z_arr[idx] = bz_phys * r_scale
+
+    return z_arr, beta_z_arr, beta_arr
 
 
-@numba.njit(fastmath=True)
-def calc_z_rel(p, nu, nu0, t_ph, c):
-    if nu <= 0.0:
-        return np.inf
-    A = (nu0 / nu) ** 2
-    beta_p = p / (c * t_ph)
-    if beta_p >= 1.0:
-        return np.inf
-    a, b = 1.0 + A, -2.0
-    c_coef = 1.0 - A * (1.0 - beta_p ** 2)
-    discriminant = b ** 2 - 4.0 * a * c_coef
-    if discriminant < 0.0:
-        return np.inf
-    return ((-b - np.sqrt(discriminant)) / (2.0 * a)) * c * t_ph
+def calc_rel_line_profile_with_ltt(
+    wave_obs,
+    lam0=10400.0,
+    vphot=0.22,
+    vmax=0.35,
+    tau_base=1.5,
+    ve=0.35,
+    t0=1.5 * 86400.0,
+    use_ltt=True,
+    use_nlte=False,
+    n_p=90
+):
+    """
+    상대론적 P-Cygni 1D 정규화 선윤곽 f(lambda) 계산
+    반환값: f(lambda) >= 1.0 (적색편이 영역), f(lambda) -> 1.0 (최대 속도 밖)
+    """
+    wave_obs = np.asarray(wave_obs, dtype=np.float64)
+    f_prof = np.ones_like(wave_obs)
 
+    r_phot = vphot * C_KMS * t0
+    r_max = vmax * C_KMS * t0
 
-@numba.njit(fastmath=True)
-def calc_rel_line_profile_with_ltt(nu_arr, lam0_AA, vmax_cgs, vphot_cgs, tau_base, t_ph, c_cgs=C_CGS, n_p=50,
-                                   use_nlte=True):
-    nu0 = c_cgs / (lam0_AA * 1e-8)
-    R_phot = t_ph * vphot_cgs
-    rmax = t_ph * vmax_cgs
-    n_nu = len(nu_arr)
-    fnu = np.zeros(n_nu)
-    p_arr = np.linspace(0.0, rmax, n_p)
-    dp = rmax / (n_p - 1)
+    # 상대론적 도플러 최소/최대 파장 범위 계산
+    doppler_min = np.sqrt((1.0 - vmax) / (1.0 + vmax))
+    doppler_max = np.sqrt((1.0 + vmax) / (1.0 - vmax))
+    lam_min = lam0 * doppler_min * 0.98
+    lam_max = lam0 * doppler_max * 1.02
 
-    for i in range(n_nu):
-        nu = nu_arr[i]
-        sum_val = 0.0
+    # 시선 충돌 매개변수 p 그리드
+    p_grid = np.linspace(0.0, r_max, n_p)
+    dp = p_grid[1] - p_grid[0]
+    norm_factor = 0.5 * (r_phot ** 2)
+
+    for i, lam in enumerate(wave_obs):
+        if lam < lam_min or lam > lam_max:
+            f_prof[i] = 1.0
+            continue
+
+        lam_ratio = lam / lam0
+        z_arr, beta_z_arr, beta_arr = solve_resonant_z_vectorized(p_grid, lam_ratio, C_KMS, t0)
+
+        # 각 p 그리드별 복사 강도 I_comoving 계산
+        I_comoving = np.zeros(n_p, dtype=np.float64)
+
         for j in range(n_p):
-            p = p_arr[j]
-            w = 0.5 if (j == 0 or j == n_p - 1) else 1.0
+            p = p_grid[j]
+            z = z_arr[j]
+            beta = beta_arr[j]
 
-            I_init = 1.0 if p <= R_phot else 0.0
-            z = calc_z_rel(p, nu, nu0, t_ph, c_cgs)
-
-            if not np.isinf(z):
-                r = np.sqrt(p ** 2 + z ** 2)
-                if r <= rmax and r >= R_phot:
-                    z_phot_front = np.sqrt(max(0.0, R_phot ** 2 - p ** 2)) if p <= R_phot else 0.0
-
-                    # 광구 후면 완전 차폐 영역 검사 (z < 0 and p <= R_phot)
-                    if not (z < 0.0 and p <= R_phot):
-                        mu = z / r if r > 0.0 else 0.0
-                        # [교정]: 지연 거리를 유효 z 좌표로 정상 계산 (1e30 폭주 원천 차단)
-                        d_delay = z - z_phot_front if p <= R_phot else z
-                        t_det_eff = max(t_ph * 0.1, t_ph + (d_delay / c_cgs))
-
-                        tau_val = tau_powerlaw_anisotropic(r, mu, t_det_eff, R_phot, tau_base, beta_power=3.0, c=c_cgs,
-                                                           use_nlte=use_nlte)
-
-                        mu_phot = np.sqrt(max(0.0, 1.0 - (R_phot / r) ** 2))
-                        beta_loc = (r / t_ph) / c_cgs
-                        W = 0.5 * (1.0 - (mu_phot - beta_loc) / (1.0 - beta_loc * mu_phot))
-                        W = max(0.0, min(1.0, W))
-
-                        # 도플러 인자 및 산란 방출 결합 (인위적 0.5 캡 해제)
-                        I_comoving = I_init * np.exp(-tau_val) + (1.0 - np.exp(-tau_val)) * W * 1.5
-                    else:
-                        I_comoving = 0.0
+            # 1. 공명점이 존재하지 않거나 최대 분출 반경 바깥인 경우
+            if np.isnan(z):
+                if p <= r_phot:
+                    I_comoving[j] = 1.0  # 광구 흑체 연속광 방출
                 else:
-                    I_comoving = I_init
+                    I_comoving[j] = 0.0
+                continue
+
+            r = np.sqrt(p ** 2 + z ** 2)
+            if r > r_max:
+                if p <= r_phot:
+                    I_comoving[j] = 1.0
+                else:
+                    I_comoving[j] = 0.0
+                continue
+
+            # 2. 광학적 깊이 tau 계산 (속도 구배 지수함수형 감쇄)
+            v = r / (C_KMS * t0)
+            tau_radial = tau_base * np.exp(-max(0.0, v - vphot) / max(ve, 1e-4))
+
+            mu = z / r if r > 0 else 0.0
+            gamma = 1.0 / np.sqrt(max(1e-6, 1.0 - beta ** 2))
+            denom = gamma * (1.0 + mu * beta - (beta ** 2) * (1.0 - mu ** 2))
+            denom = max(denom, 1e-6)
+            geom_factor = ((1.0 + mu * beta) ** 2) / denom
+            tau_val = tau_radial * geom_factor
+
+            # 3. 원천함수 S 계산 (EATS 시간 지연 및 냉각 보정)
+            if r <= r_phot:
+                W = 1.0
             else:
-                I_comoving = I_init
+                mu_phot = np.sqrt(max(0.0, 1.0 - (r_phot / r) ** 2))
+                denom_w = max(1e-6, 1.0 - beta * mu_phot)
+                W = 0.5 * (1.0 - (mu_phot - beta) / denom_w)
+                W = np.clip(W, 0.0, 1.0)
 
-            sum_val += I_comoving * p * w
+            if use_ltt:
+                z_front = np.sqrt(max(0.0, r_phot ** 2 - p ** 2)) if p <= r_phot else 0.0
+                t_em = max(0.1 * t0, t0 - (z_front - z) / C_KMS)
+                t_ratio = (t0 / t_em) ** 0.5
+            else:
+                t_ratio = 1.0
 
-        norm_factor = 0.5 * (R_phot ** 2)
-        fnu[i] = (sum_val * dp) / norm_factor if norm_factor > 0.0 else 1.0
+            S_source = W * t_ratio
 
-    return fnu[::-1]
+            # NLTE 형광/비열적 펌핑 방출 보정
+            if use_nlte:
+                S_source *= (1.0 + 0.6 * np.exp(-max(0.0, v - vphot) / max(ve, 1e-4)))
+
+            # 4. 복사전달 방정식 형식해 적용 (핵심 수정 구역)
+            if p <= r_phot:
+                z_front = np.sqrt(r_phot ** 2 - p ** 2)
+                if z >= z_front:
+                    # [구역 3: 광구 앞면 대기] -> 흡수 및 재방출
+                    I_comoving[j] = 1.0 * np.exp(-tau_val) + S_source * (1.0 - np.exp(-tau_val))
+                else:
+                    # [구역 1 & 2: 광구 뒤편 대기 및 앞면 표면]
+                    # 뒤쪽 대기 방출은 광구에 차폐(0.0), 앞면 연속광은 흡수선 없이 100% 통과(1.0)
+                    I_comoving[j] = 1.0
+            else:
+                # [구역 B: 광구 바깥쪽 껍질] -> 순수 방출
+                I_comoving[j] = S_source * (1.0 - np.exp(-tau_val))
+
+        # 충돌 매개변수 평면 면적분
+        flux_sum = np.sum(I_comoving * p_grid) * dp
+        f_prof[i] = flux_sum / norm_factor
+
+    return f_prof
