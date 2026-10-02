@@ -4,6 +4,7 @@
 """
 src/models.py
 킬로노바 AT2017gfo 상대론적 복사전달 합성 분광 모델 및 물리 엔진
+(Sr II 삼중항 Beer-Lambert 흡수 결합 및 건설적 방출 합산 적용)
 """
 
 import numpy as np
@@ -28,7 +29,6 @@ CEN2_AA, SIG2_AA = 20200.0, 800.0
 try:
     from src.continuum import calc_relativistic_blackbody_continuum
 except ImportError:
-    # src.continuum 임포트 불가 시 사용할 고정밀 수치적분 Fallback (wave_m**5 적용)
     @numba.njit(fastmath=True)
     def relativistic_blackbody_flam(wave_m, T_prime, beta, n_mu=32):
         if beta >= 1.0 or beta < 0.0 or T_prime <= 0.0 or wave_m <= 0.0:
@@ -178,7 +178,7 @@ def calc_rel_line_profile_1d_fast(nu_arr, lam0_AA, vmax_cgs, vphot_cgs, tauref, 
 
 
 def p_cygni_line_corr_rel_1d(wl_target, vmax, vphot, tau, lam0_AA, ve, t0):
-    """목표 파장 그리드(wl_target)에 대해 보간된 P Cygni 보정 계수 반환"""
+    """목표 파장 그리드(wl_target)에 대해 보간된 단일 전이선 P Cygni 보정 계수 반환"""
     c_cgs = C_CGS
     vmax_cgs, vphot_cgs, ve_cgs = vmax * c_cgs, vphot * c_cgs, ve * c_cgs
     beta_max = min(vmax, 0.99)
@@ -215,15 +215,20 @@ def planck_with_mod_full_relativistic(
     N = N_29 * 1e-29
     intensity = calc_relativistic_blackbody_continuum(wav, T_prime, vphot, n_mu=16)
 
-    # Sr II 삼중항 프로파일 합성 (상대 강도비: 1.0 : 8.1 : 4.7)
+    # Sr II 삼중항 단일 전이선 계산 (상대 강도비: 1.0 : 8.1 : 4.7)
     pcyg_prof3 = p_cygni_line_corr_rel_1d(wav, vmax, vphot, (1.0 / 13.8) * tau, 10036.65, ve, t0)
     pcyg_prof4 = p_cygni_line_corr_rel_1d(wav, vmax, vphot, (8.1 / 13.8) * tau, 10327.311, ve, t0)
     pcyg_prof5 = p_cygni_line_corr_rel_1d(wav, vmax, vphot, (4.7 / 13.8) * tau, 10914.887, ve, t0)
-    correction = pcyg_prof3 * pcyg_prof4 * pcyg_prof5
 
-    # 방출 영역(correction > 1.0)에 기하학적 은폐 인자(trans) 적용
-    mask_emission = correction > 1.0
-    correction[mask_emission] = (correction[mask_emission] - 1.0) * trans + 1.0
+    # [핵심 교정]: 단순 곱셈(P3*P4*P5)에 의한 방출 피크 억제 제거
+    # 1) 흡수 성분: Beer-Lambert 법칙에 따른 광학적 깊이 감쇄 곱셈 (<= 1.0)
+    abs_corr = np.minimum(1.0, pcyg_prof3) * np.minimum(1.0, pcyg_prof4) * np.minimum(1.0, pcyg_prof5)
+
+    # 2) 방출 성분: 각 전이선의 산란 방출 초과분을 건설적으로 합산 (>= 0.0)
+    emit_corr = np.maximum(0.0, pcyg_prof3 - 1.0) + np.maximum(0.0, pcyg_prof4 - 1.0) + np.maximum(0.0, pcyg_prof5 - 1.0)
+
+    # 3) 기하학적 차폐 계수(trans)를 순수 방출 성분에만 부드럽게 적용 (불연속 꺾임 제거)
+    correction = abs_corr + emit_corr * trans
 
     # 근적외선 가우시안 험프 결합
     gauss1 = amp1 * np.exp(-0.5 * ((wav - CEN1_AA) / SIG1_AA)**2)
