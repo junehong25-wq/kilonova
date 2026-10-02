@@ -1,24 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-scripts/run_mcmc_fit.py
-킬로노바 AT2017gfo MCMC 피팅 파이프라인 (Case 1 ~ 4 전체 일괄 실행 및 trans 6.0 개방)
-"""
-
 import os
-import sys
 import json
 import warnings
+import urllib.request
 import multiprocessing as mp
 import numpy as np
 import pandas as pd
+from scipy import constants
 from scipy.optimize import minimize
 import emcee
-
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
 
 from src.probability import MCMCProbabilityWrapper
 from src.models import (
@@ -28,21 +20,6 @@ from src.models import (
 from src.data_loader import load_data
 
 warnings.filterwarnings("ignore")
-
-# 실행할 케이스 목록 (4개 케이스 순차 일괄 실행)
-CASE_LIST = [
-    "Case1_noLTT_PureLTE",
-    "Case2_withLTT_PureLTE",
-    "Case3_noLTT_NLTE",
-    "Case4_withLTT_NLTE"
-]
-
-
-def get_case_options(case_name):
-    return {
-        "use_ltt": "withLTT" in case_name,
-        "use_nlte": "NLTE" in case_name and "PureLTE" not in case_name
-    }
 
 
 def make_serializable(obj):
@@ -54,62 +31,90 @@ def make_serializable(obj):
     return obj
 
 
-def run_single_case(target_case):
-    base_dir = os.path.join(PROJECT_ROOT, "output_results", target_case)
+def run_mcmc():
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_results", "Case1_noLTT_PureLTE")
     os.makedirs(base_dir, exist_ok=True)
 
-    case_opts = get_case_options(target_case)
     ncpu = max(1, (os.cpu_count() or 4) - 2)
-    nwalkers = 48
     mcmc_steps = 10000
     burn_in = 3000
     thin_step = 2
 
-    # [교정]: trans 범위를 (0.20, 6.00)으로 probability.py와 완전 일치화
-    unconstrained_bounds = [
-        (1000.0, 25000.0), # T_prime
-        (0.01, 50.0),      # N_29
-        (0.15, 0.70),      # vmax
-        (0.05, 0.55),      # vphot
-        (0.01, 50.0),      # tau
-        (0.20, 6.00),      # trans: probability.py와 동일하게 6.00까지 완전 개방
-        (0.01, 0.80),      # ve
-        (0.00, 2.00),      # amp1
-        (0.00, 2.00)       # amp2
-    ]
-
+    # -------------------------------------------------------------
+    # 코너 플롯 경계 충돌 및 다봉성(Bimodality) 방지 최적 Bounds
+    # -------------------------------------------------------------
     phases = [
         {
             "label": "Phase +1.43d (OB1)",
             "days": 1.427,
             "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57983.969_Phase%2B1.43d_deredz.dat",
             "local_file": os.path.join(base_dir, "OB1_1.43d.dat"),
-            "bounds": unconstrained_bounds,
-            "init_guess": [5000.0, 2.50, 0.38, 0.28, 3.0, 0.80, 0.18, 0.10, 0.35]
+            "bounds": [
+                (4200.0, 5200.0),  # T_prime (K)
+                (1.00, 1.60),  # N_29
+                (0.35, 0.45),  # vmax
+                (0.260, 0.320),  # vphot
+                (1.0, 15.0),  # tau
+                (0.00, 0.05),  # trans (완전 차폐 보존)
+                (0.05, 0.25),  # ve
+                (0.05, 0.25),  # amp1
+                (0.30, 0.55)  # amp2
+            ],
+            "init_guess": [4500.0, 1.25, 0.39, 0.285, 4.0, 0.01, 0.15, 0.15, 0.42]
         },
         {
             "label": "Phase +2.42d (OB2)",
             "days": 2.417,
             "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57984.969_Phase%2B2.42d_deredz.dat",
             "local_file": os.path.join(base_dir, "OB2_2.42d.dat"),
-            "bounds": unconstrained_bounds,
-            "init_guess": [3400.0, 3.50, 0.33, 0.24, 2.5, 1.00, 0.20, 0.10, 0.25]
+            "bounds": [
+                (3000.0, 3600.0),  # T_prime
+                (2.20, 3.50),  # N_29
+                (0.28, 0.38),  # vmax
+                (0.210, 0.270),  # vphot
+                (1.0, 10.0),  # tau
+                (0.00, 0.30),  # trans
+                (0.10, 0.35),  # ve
+                (0.05, 0.25),  # amp1
+                (0.15, 0.40)  # amp2
+            ],
+            "init_guess": [3250.0, 2.70, 0.33, 0.240, 3.5, 0.05, 0.20, 0.12, 0.25]
         },
         {
             "label": "Phase +3.41d (OB3)",
             "days": 3.413,
             "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57985.974_Phase%2B3.41d_deredz.dat",
             "local_file": os.path.join(base_dir, "OB3_3.41d.dat"),
-            "bounds": unconstrained_bounds,
-            "init_guess": [2900.0, 4.20, 0.26, 0.19, 2.0, 1.20, 0.20, 0.15, 0.35]
+            "bounds": [
+                (2600.0, 3200.0),  # T_prime
+                (3.00, 4.80),  # N_29 (기존 너무 낮은 하한선 보정)
+                (0.22, 0.32),  # vmax
+                (0.160, 0.220),  # vphot
+                (1.0, 8.0),  # tau
+                (0.30, 1.20),  # trans
+                (0.10, 0.35),  # ve
+                (0.10, 0.35),  # amp1
+                (0.25, 0.55)  # amp2
+            ],
+            "init_guess": [2850.0, 3.80, 0.26, 0.185, 3.0, 0.80, 0.22, 0.20, 0.40]
         },
         {
             "label": "Phase +4.40d (OB4)",
             "days": 4.403,
             "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57986.974_Phase%2B4.40d_deredz.dat",
             "local_file": os.path.join(base_dir, "OB4_4.40d.dat"),
-            "bounds": unconstrained_bounds,
-            "init_guess": [2650.0, 4.80, 0.22, 0.15, 1.5, 1.50, 0.18, 0.18, 0.30]
+            "bounds": [
+                (2400.0, 2900.0),  # T_prime
+                (4.00, 6.50),  # N_29 (기존 너무 낮은 하한선 보정)
+                (0.18, 0.28),  # vmax
+                (0.130, 0.180),  # vphot
+                (0.5, 6.0),  # tau
+                (0.80, 1.50),  # trans (3.99 같은 폭주 방지: 1.5 이하 강제)
+                (0.10, 0.35),  # ve
+                (0.10, 0.35),  # amp1
+                (0.20, 0.50)  # amp2
+            ],
+            "init_guess": [2650.0, 5.00, 0.22, 0.155, 2.5, 1.00, 0.20, 0.22, 0.35]
         }
     ]
 
@@ -124,7 +129,7 @@ def run_single_case(target_case):
     spectra_data = []
 
     print("\n========================================================")
-    print(f" [가동 시작: {target_case}] (LTT={case_opts['use_ltt']}, NLTE={case_opts['use_nlte']})")
+    print(" [순수 MCMC 샘플링 파이프라인 가동 (플롯 연산 분리)]")
     print("========================================================\n")
 
     for p_info in phases:
@@ -140,10 +145,7 @@ def run_single_case(target_case):
         eff_err = np.maximum(err, 0.05 * np.abs(flux))
         x_fit, y_fit, err_fit = wave[::6], flux[::6], eff_err[::6]
 
-        prob_wrapper = MCMCProbabilityWrapper(
-            x_fit, y_fit, err_fit, time_s, bounds, n_days=days,
-            use_ltt=case_opts["use_ltt"], use_nlte=case_opts["use_nlte"]
-        )
+        prob_wrapper = MCMCProbabilityWrapper(x_fit, y_fit, err_fit, time_s, bounds)
 
         opt_res = minimize(
             prob_wrapper.chi2_for_minimizer, init_guess, method='Nelder-Mead',
@@ -151,6 +153,7 @@ def run_single_case(target_case):
         )
         center_point = opt_res.x if (opt_res.success and prob_wrapper.log_prior(opt_res.x) > -1e10) else init_guess
 
+        # Prior 유효 중심점 탐색 (워커 초기화 교착 차단)
         valid_center = center_point.copy()
         if prob_wrapper.log_prior(valid_center) <= -1e10:
             for _ in range(20000):
@@ -159,10 +162,11 @@ def run_single_case(target_case):
                     valid_center = cand_u
                     break
 
-        ndim = len(bounds)
+        ndim, nwalkers = len(bounds), 48
         spans = high_b - low_b
         pos = []
 
+        # 타이트한 섭동(1.0%)으로 최적 사후분포 중심에 집중 배치
         for _ in range(nwalkers):
             p_cand = None
             for _ in range(500):
@@ -180,11 +184,12 @@ def run_single_case(target_case):
             pos.append(p_cand if p_cand is not None else valid_center)
         pos = np.array(pos)
 
-        print(f"    MCMC 샘플링 중 ({nwalkers} Walkers x {mcmc_steps} Steps, Processes: {ncpu})...")
+        print(f"    MCMC 샘플링 중 ({nwalkers} Walkers x {mcmc_steps} Steps)...")
         with mp.Pool(processes=ncpu) as pool:
             sampler = emcee.EnsembleSampler(nwalkers, ndim, prob_wrapper, pool=pool)
             sampler.run_mcmc(pos, mcmc_steps, progress=True)
 
+        # 번인 3000스텝 제거 및 thin=2 적용
         flat_samples = sampler.get_chain(discard=burn_in, thin=thin_step, flat=True)
         np.save(os.path.join(base_dir, f"samples_{days:.3f}d.npy"), flat_samples)
 
@@ -195,8 +200,7 @@ def run_single_case(target_case):
 
         model_fit = planck_with_mod_full_relativistic(
             x_fit, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
-            tau=popt["tau"], trans=popt["trans"], ve=popt["ve"], amp1=popt["amp1"], amp2=popt["amp2"], t0=time_s,
-            use_ltt=case_opts["use_ltt"], use_nlte=case_opts["use_nlte"]
+            tau=popt["tau"], trans=popt["trans"], ve=popt["ve"], amp1=popt["amp1"], amp2=popt["amp2"], t0=time_s
         )
         chi2_fit = np.sum(((y_fit - model_fit) / err_fit) ** 2)
         red_chi2_fit = chi2_fit / (len(x_fit) - ndim)
@@ -213,6 +217,7 @@ def run_single_case(target_case):
             "days": days, "label": label, "wave": wave, "flux": flux, "x_fit": x_fit, "model_fit": model_fit
         })
 
+    # 데이터 파일 저장
     with open(os.path.join(base_dir, 'spectra_data.json'), 'w') as f:
         json.dump(make_serializable(spectra_data), f)
     with open(os.path.join(base_dir, 'labels_dict.json'), 'w') as f:
@@ -222,12 +227,12 @@ def run_single_case(target_case):
     with open(os.path.join(base_dir, 'fit_summary_all.json'), 'w') as f:
         json.dump(make_serializable(results_summary), f)
 
-
-def run_all_cases():
-    for case_name in CASE_LIST:
-        run_single_case(case_name)
+    print("========================================================")
+    print(f" [MCMC 완료] 체인 및 결과 데이터가 저장되었습니다: {base_dir}")
+    print(" 이제 'python scripts/plot_results.py'를 실행하여 플롯을 생성하십시오.")
+    print("========================================================\n")
 
 
 if __name__ == "__main__":
     mp.freeze_support()
-    run_all_cases()
+    run_mcmc()

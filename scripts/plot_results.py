@@ -1,22 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-scripts/plot_results.py
-MCMC 결과 시각화 스크립트 (Case 1~4 물리 옵션 자동 감지 렌더링)
-"""
-
 import os
-import sys
 import json
 import numpy as np
-
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.models import (
@@ -31,10 +18,9 @@ except ImportError:
 
 
 def plot_all_results():
-    base_dir = os.path.join(PROJECT_ROOT, "output_results")
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_results")
     if not os.path.exists(base_dir):
-        print(f"[경고] 결과 폴더를 찾을 수 없습니다: {base_dir}")
-        return
+        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output_results")
 
     case_folders = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
     if not case_folders:
@@ -50,10 +36,7 @@ def plot_all_results():
         if not os.path.exists(res_json):
             continue
 
-        use_ltt = "withLTT" in case_id
-        use_nlte = "NLTE" in case_id and "PureLTE" not in case_id
-
-        print(f"\n--> [{case_id}] 플롯 렌더링 시작 (LTT={use_ltt}, NLTE={use_nlte})...")
+        print(f"\n--> [{case_id}] 9D/7D 호환 물리 정규화 기반 플롯 생성...")
 
         with open(res_json, 'r') as f:
             results_summary = json.load(f)
@@ -88,11 +71,10 @@ def plot_all_results():
                     )
                     fig.savefig(os.path.join(target_save_dir, f"Corner_Phase_{days:.2f}d.png"), dpi=200)
                     plt.close(fig)
-                    print(f"    [완료] Corner_Phase_{days:.2f}d.png")
                 except Exception as e:
                     print(f"    [참고] {days:.2f}d 코너 플롯 생성 생략 ({e})")
 
-        # 2. 스펙트럼 및 라인 프로파일 핏
+        # 2. 개별 Spectrum Fit & Line Profile
         for idx, sdata in enumerate(spectra_data):
             days = sdata["days"]
             popt = results_summary[idx]["popt"]
@@ -100,6 +82,7 @@ def plot_all_results():
             flux = np.array(sdata["flux"])
             t_ph = days * 86400.0
 
+            # 7D / 9D 파라미터 명칭 호환
             tau_val = float(popt.get("tau", popt.get("tau_sr", 1.5)))
             ve_val = float(popt.get("ve", 0.35))
             trans_val = float(popt.get("trans", 0.5))
@@ -107,12 +90,11 @@ def plot_all_results():
             amp2_val = float(popt.get("amp2", 0.40))
             dl_val = float(results_summary[idx].get("dl_med", 40.0))
 
-            # 전체 스펙트럼 핏
+            # 개별 스펙트럼 핏
             model_flux = planck_with_mod_full_relativistic(
                 wave, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
                 tau=tau_val, trans=trans_val, ve=ve_val,
-                amp1=amp1_val, amp2=amp2_val, t0=t_ph,
-                use_ltt=use_ltt, use_nlte=use_nlte
+                amp1=amp1_val, amp2=amp2_val, t0=t_ph
             )
             fig, ax = plt.subplots(figsize=(10, 6))
             ax.plot(wave, flux, color="lightgray", label="Data", lw=1.0)
@@ -127,7 +109,7 @@ def plot_all_results():
             plt.savefig(os.path.join(target_save_dir, f"Plot1_Spectrum_Fit_{days:.2f}d.png"), dpi=200)
             plt.close(fig)
 
-            # 정규화 라인 프로파일 (7000 ~ 12500 Å)
+            # (2) 개별 라인 프로파일 (7000 ~ 12500 Å 물리 연속광 정규화)
             mask_zoom = (wave >= 7000) & (wave <= 12500)
             w_zoom, f_zoom = wave[mask_zoom], flux[mask_zoom]
             cont_zoom = (popt["N_29"] * 1e-29) * calc_relativistic_blackbody_continuum(w_zoom, popt["T_prime"], popt["vphot"])
@@ -135,17 +117,16 @@ def plot_all_results():
             norm_obs = f_zoom / np.maximum(cont_zoom, 1e-35)
             norm_occulted = planck_with_mod_full_relativistic(
                 w_zoom, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
-                tau=tau_val, trans=trans_val, ve=ve_val, amp1=amp1_val, amp2=amp2_val, t0=t_ph,
-                use_ltt=use_ltt, use_nlte=use_nlte
+                tau=tau_val, trans=trans_val, ve=ve_val, amp1=amp1_val, amp2=amp2_val, t0=t_ph
             ) / np.maximum(cont_zoom, 1e-35)
 
             norm_no_occult = planck_with_mod_full_relativistic(
                 w_zoom, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
-                tau=tau_val, trans=1.0, ve=ve_val, amp1=amp1_val, amp2=amp2_val, t0=t_ph,
-                use_ltt=use_ltt, use_nlte=use_nlte
+                tau=tau_val, trans=1.0, ve=ve_val, amp1=amp1_val, amp2=amp2_val, t0=t_ph
             ) / np.maximum(cont_zoom, 1e-35)
 
             fig, ax = plt.subplots(figsize=(10, 6))
+            ax.axvspan(9950, 10250, color="lightgray", alpha=0.3, label="Masked Region")
             ax.plot(w_zoom, norm_obs, color="lightgray", lw=1.2, label="Normalized Observed Data")
             ax.plot(w_zoom, norm_occulted, color="teal", lw=2.2, label=rf"Best-fit Profile ($\mathrm{{trans}}={trans_val:.2f}$)")
             ax.plot(w_zoom, norm_no_occult, color="darkorange", ls="--", lw=2.0, label=r"Standard Line ($\mathrm{trans}=1.0$)")
@@ -163,7 +144,7 @@ def plot_all_results():
             plt.savefig(os.path.join(target_save_dir, f"Plot2_Line_Profile_{days:.2f}d.png"), dpi=200)
             plt.close(fig)
 
-        print(f"--> [성공] [{case_id}] 전체 플롯 저장 완료!")
+        print(f"--> [성공] [{case_id}] 전체 플롯 렌더링 완료!")
 
 
 if __name__ == "__main__":
