@@ -3,7 +3,7 @@
 
 """
 src/probability.py
-인위적 가중치를 완전히 배제한 순수 물리 복사전달 MCMC 확률 밀도 래퍼
+기하학적 trans 제약이 적용된 순수 복사전달 MCMC 확률 밀도 래퍼
 """
 
 import numpy as np
@@ -36,14 +36,15 @@ class MCMCProbabilityWrapper(object):
             if N_29 <= 1e-4 or N_29 > 100.0: return -np.inf
             if vphot <= 0.01 or vmax >= 0.99: return -np.inf
             if tau <= 0.001 or tau > 50.0: return -np.inf
-            if trans < 0.20 or trans > 6.0: return -np.inf
+            # 기하학적 차폐 인자 물리적 범위 (0.50 ~ 1.50)
+            if trans < 0.50 or trans > 1.50: return -np.inf
             if ve <= 0.001 or ve > 0.90: return -np.inf
             if amp1 < 0.0 or amp1 > 5.0 or amp2 < 0.0 or amp2 > 5.0: return -np.inf
 
-        if vphot >= vmax - 0.005 or ve <= 0.001 or tau <= 0.001 or N_29 <= 0.0 or trans < 0.20:
+        if vphot >= vmax - 0.005 or ve <= 0.001 or tau <= 0.001 or N_29 <= 0.0 or trans < 0.50 or trans > 1.50:
             return -np.inf
 
-        # 모은하 참값에 대한 부드러운 천문학적 Gaussian Prior (하드 바운드 제거)
+        # 모은하 광도 거리 Gaussian Prior (40.0 ± 4.0 Mpc)
         dl = lum_dist_arr(np.array([N_29]), np.array([vphot]), n_days=self.n_days)[0]
         lp_dl = -0.5 * ((dl - 40.0) / 4.0) ** 2
         return lp_dl
@@ -59,7 +60,6 @@ class MCMCProbabilityWrapper(object):
             if np.any(np.isnan(model)) or np.any(np.isinf(model)) or np.any(model <= 0.0):
                 return -np.inf
 
-            # 조작 없는 순수 Chi2 계산
             total_chi2 = np.sum(((self.y_fit - model) / self.err_fit) ** 2)
             return -0.5 * total_chi2
         except Exception:

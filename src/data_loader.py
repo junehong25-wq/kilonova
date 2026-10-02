@@ -3,7 +3,7 @@
 
 """
 src/data_loader.py
-관측 분광 데이터 전처리 (가시광선 블랭킷팅 간섭 배제: 7000 ~ 21500 Å)
+관측 분광 데이터 전처리 (Sr II 피쳐 중심 물리 대역: 7,000 ~ 13,500 Å)
 """
 
 import os
@@ -56,11 +56,7 @@ def load_data(url, local_filename="temp_spectrum.dat"):
     if wave.max() < 3000:
         wave = wave * 10.0
 
-    # [핵심]: 가시광선 블랭킷팅 붕괴 영역(wave < 7000 Å)을 배제하여 단일 흑체 물리 정합성 확보
-    exc_reg = (
-        ~((wave > 13100) & (wave < 14400))
-        & ~((wave > 17550) & (wave < 19200))
-        & ~((wave > 5330) & (wave < 5740))
-        & (wave >= 7000) & (wave <= 21500)
-    )
+    # [핵심]: 가시광선 블랭킷팅과 적외선 오버슈트의 간섭을 배제하고,
+    # Sobolev P-Cygni 라인이 지배하는 7,000 ~ 13,500 Å 핵심 영역만 추출
+    exc_reg = (wave >= 7000.0) & (wave <= 13500.0)
     return wave[exc_reg], flux[exc_reg], err[exc_reg]
