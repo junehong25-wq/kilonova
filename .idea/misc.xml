@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Black">
+    <option name="sdkName" value="SSH (sftp://jshin@210.117.211.134:22/home/jshin/.virtualenvs/kilonova-main/bin/python)" />
+  </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="SSH (sftp://jshin@210.117.211.134:22/home/jshin/.virtualenvs/kilonova-main/bin/python)" project-jdk-type="Python SDK" />
+</project>

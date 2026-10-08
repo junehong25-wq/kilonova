@@ -1,0 +1,126 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.integrate import quad
+from astropy import constants as const
+from astropy.modeling import fitting
+from astropy.modeling.models import custom_model
+
+h = const.h.value
+c = const.c.value
+k_B = const.k_B.value
+
+C1_L = 2.0 * h * c ** 2
+C2_L = (h * c) / k_B
+LAMBDA_REST = 10327e-10
+
+def core_flux_numerical(lambd, T_prime, beta):
+    gamma = 1.0 / np.sqrt(1.0 - beta ** 2)
+
+    def integrand(mu_prime):
+        delta = gamma * (1.0 + beta * mu_prime)
+        exponent = np.clip(C2_L / (delta * lambd * T_prime), None, 700)
+        planck_raw = (C1_L / lambd ** 5) / (np.exp(exponent) - 1.0)
+        return (1.0 / delta ** 3) * planck_raw * (mu_prime + beta)
+
+    val, _ = quad(integrand, 0.0, 1.0, epsabs=1e-12, epsrel=1e-4)
+    return 2.0 * np.pi * gamma * val
+
+def core_flux_analytic(lambd, T_prime, beta, mu_fixed=0.6):
+    gamma = 1.0 / np.sqrt(1.0 - beta ** 2)
+    delta_fixed = gamma * (1.0 + beta * mu_fixed)
+    front_term = np.pi * (1.0 + 2.0 * beta) * gamma
+
+    exponent = np.clip(C2_L / (delta_fixed * lambd * T_prime), None, 700)
+    planck_raw = (C1_L / lambd ** 5) / (np.exp(exponent) - 1.0)
+
+    return front_term * (1.0 / delta_fixed ** 3) * planck_raw
+
+@custom_model
+def NumericalJoint(x, T_prime=5000.0, beta=0.2, amplitude=1.0, depth=0.3, width=800e-10):
+    x_arr = np.atleast_1d(x).flatten()
+    flux_raw = np.array([core_flux_numerical(l, float(T_prime), float(beta)) for l in x_arr])
+    flux_norm = flux_raw / np.max(flux_raw)
+    lambda_obs = LAMBDA_REST * np.sqrt((1 - float(beta)) / (1 + float(beta)))
+    absorption = 1.0 - float(depth) * np.exp(-0.5 * ((x_arr - lambda_obs) / float(width)) ** 2)
+    return (flux_norm * float(amplitude) * absorption).flatten()
+
+@custom_model
+def AnalyticJoint(x, T_prime=5000.0, beta=0.2, amplitude=1.0, depth=0.3, width=800e-10):
+    x_arr = np.atleast_1d(x).flatten()
+    flux_raw = core_flux_analytic(x_arr, float(T_prime), float(beta))
+    flux_norm = flux_raw / np.max(flux_raw)
+    lambda_obs = LAMBDA_REST * np.sqrt((1 - float(beta)) / (1 + float(beta)))
+    absorption = 1.0 - float(depth) * np.exp(-0.5 * ((x_arr - lambda_obs) / float(width)) ** 2)
+    return (flux_norm * float(amplitude) * absorption).flatten()
+
+url_1 = 'https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57983.969_Phase%2B1.43d_deredz.dat'
+df1 = pd.read_csv(url_1, sep='\t', comment='#',
+                  names=['wavelength', 'flux_tell_corrected', 'flux_not_tell_corrected', 'variance']).dropna(
+    subset=['wavelength', 'flux_tell_corrected'])
+
+wl_raw = df1['wavelength'].values * 1e-10
+flux_raw = df1['flux_tell_corrected'].values
+mask_fit = (wl_raw > 350e-9) & (wl_raw < 2200e-9) & (flux_raw > 0)
+
+wl_obs = wl_raw[mask_fit]
+flux_obs = flux_raw[mask_fit]
+
+wl_fit = wl_obs[::10]
+flux_fit = flux_obs[::10]
+flux_max = np.max(flux_fit)
+flux_fit_norm = flux_fit / flux_max
+
+init_params = dict(T_prime=5000.0, beta=0.20, amplitude=1.0, depth=0.3, width=800e-10)
+bounds = {'T_prime': (2000.0, 10000.0), 'beta': (0.01, 0.40), 'amplitude': (0.0, 3.0), 'depth': (0.0, 0.9),
+          'width': (100e-10, 2000e-10)}
+
+init_num = NumericalJoint(**init_params)
+init_ana = AnalyticJoint(**init_params)
+for param, bnd in bounds.items():
+    getattr(init_num, param).bounds = bnd
+    getattr(init_ana, param).bounds = bnd
+
+fitter = fitting.LevMarLSQFitter()
+
+fit_num = fitter(init_num, wl_fit, flux_fit_norm)
+fit_ana = fitter(init_ana, wl_fit, flux_fit_norm)
+
+wl_plot = np.linspace(350e-9, 2200e-9, 400)
+flux_num_joint = fit_num(wl_plot).flatten() * flux_max
+flux_ana_joint = fit_ana(wl_plot).flatten() * flux_max
+
+flux_num_raw = np.array([core_flux_numerical(l, fit_num.T_prime.value, fit_num.beta.value) for l in wl_plot])
+flux_num_pure = (flux_num_raw / np.max(flux_num_raw)) * fit_num.amplitude.value * flux_max
+
+flux_ana_raw = core_flux_analytic(wl_plot, fit_ana.T_prime.value, fit_ana.beta.value)
+flux_ana_pure = (flux_ana_raw / np.max(flux_ana_raw)) * fit_ana.amplitude.value * flux_max
+
+plt.figure(figsize=(12, 8))
+plt.plot(wl_obs * 1e10, flux_obs, color='black', marker='.', linestyle='none', markersize=2, alpha=0.3,
+         label='AT2017gfo (+1.43d) Data')
+
+plt.plot(wl_plot * 1e10, flux_num_pure, color='blue', linestyle=':', linewidth=2, alpha=0.6,
+         label="Numerical spectrum")
+plt.plot(wl_plot * 1e10, flux_ana_pure, color='orange', linestyle=':', linewidth=2, alpha=0.6,
+         label="Analytic spectrum")
+
+plt.plot(wl_plot * 1e10, flux_num_joint, 'b-', linewidth=3,
+         label=rf"Numerical model with sr+ ($T'={fit_num.T_prime.value:.0f}$K, $\beta={fit_num.beta.value:.3f}$)")
+plt.plot(wl_plot * 1e10, flux_ana_joint, color='darkorange', linestyle='--', linewidth=3, alpha=1.0,
+         label=rf"Analytic model with sr+ ($T'={fit_ana.T_prime.value:.0f}$K, $\beta={fit_ana.beta.value:.3f}$)")
+
+obs_lambda_num = 10327 * np.sqrt((1 - fit_num.beta.value) / (1 + fit_num.beta.value))
+plt.axvline(obs_lambda_num, color='blue', linestyle='-.', linewidth=1.5, alpha=0.5)
+
+obs_lambda_ana = 10327 * np.sqrt((1 - fit_ana.beta.value) / (1 + fit_ana.beta.value))
+plt.axvline(obs_lambda_ana, color='darkorange', linestyle='-.', linewidth=1.5, alpha=0.5)
+
+plt.title("AT2017gfo Relativistic Fitting (Corrected Models)", fontsize=16)
+plt.xlabel(r"Wavelength ($\AA$)", fontsize=14)
+plt.ylabel(r"Flux ($erg/s/cm^2/\AA$)", fontsize=14)
+plt.legend(fontsize=11, loc='upper right')
+plt.grid(True, alpha=0.4)
+plt.tight_layout()
+plt.savefig('AT2017gfo_Corrected_Joint_Fitting.png', dpi=300)
+plt.show()
