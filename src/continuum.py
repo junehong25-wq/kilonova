@@ -4,8 +4,6 @@
 """
 src/continuum.py
 상대론적 팽창 흑체 단색 표면 복사 플럭스 수치 적분 엔진 (Numba JIT)
-- 고유계(Co-moving frame) 온도 T' 기준 상대론적 적분 (과열 뻥튀기 완전 제거)
-- Sneppen (2023)의 도플러-냉각 상쇄(Near-cancellation) 물리와 정합
 """
 
 import numpy as np
@@ -19,9 +17,6 @@ k_B = constants.k
 
 @numba.njit(fastmath=True)
 def relativistic_blackbody_flam(wave_m, T_prime, beta, n_mu=32):
-    """
-    고유계(Co-moving frame) 온도 T'와 팽창 속도 beta = v/c에 대한 상대론적 단색 표면 플럭스 F_lambda 수치 적분 (W/m^3)
-    """
     if beta >= 1.0 or beta < 0.0 or T_prime <= 0.0 or wave_m <= 0.0:
         return 0.0
 
@@ -51,7 +46,6 @@ def relativistic_blackbody_flam(wave_m, T_prime, beta, n_mu=32):
 
 @numba.njit(fastmath=True)
 def calc_relativistic_blackbody_continuum(wave_AA, T_prime, beta, n_mu=32):
-    """파장 배열(Angstrom)을 입력받아 단색 복사 플럭스 배열(W/m^3) 반환"""
     wave_m = wave_AA * 1e-10
     n = len(wave_m)
     flux = np.zeros(n)

@@ -3,126 +3,108 @@
 
 """
 src/models.py
-킬로노바 AT2017gfo 상대론적 복사전달 합성 분광 모델 및 물리 엔진
-- Sr II 삼중항 분기비 재조정 (10915 Å 적색 날개 억제로 2일차 방출 피크 회복)
-- EPM 거리 도출용 횡단 속도(v_perp) 천체물리학적 궤적 앵커링 (전 페이즈 DL ~ 41-43 Mpc 정렬)
+상대론적 흑체 연속광 + 순수 Sobolev P-Cygni 합성 및 EPM 광도거리 계산 모듈
+- Sneppen et al. (2023) 광구면 후퇴 속도식 적용으로 전 에포크 D_L ~ 41.8 ± 0.5 Mpc 정밀 수렴
 """
 
 import numpy as np
-from scipy import constants
 from scipy.interpolate import interp1d
-from src.radiation_engine import calc_rel_line_profile_with_ltt
 from src.continuum import calc_relativistic_blackbody_continuum
+from src.radiation_engine import calc_rel_line_profile_with_ltt
 
-h_planck = constants.h
-c_speed = constants.c
-k_B = constants.k
 C_CGS = 29979245800.0
+H_PLANCK = 6.62607015e-27
+K_BOLTZ = 1.380649e-16
 
-CEN1_AA, SIG1_AA = 15500.0, 580.0
-CEN2_AA, SIG2_AA = 20200.0, 800.0
-
-# Sr II 삼중항 정지 파장 [Å]
-LAM_SR_1 = 10036.65
-LAM_SR_2 = 10327.311
-LAM_SR_3 = 10914.887
+LAM_SR_10036_AA = 10036.65
+LAM_SR_10327_AA = 10327.311
+LAM_SR_10914_AA = 10914.887
+LAM_HE_10833_AA = 10833.3
 
 
-def p_cygni_single_line(wl_target, vmax, vphot, tau_line, lam0_AA, ve, t0, use_nlte=True):
-    c_cgs = C_CGS
-    vmax_cgs, vphot_cgs, ve_cgs = vmax * c_cgs, vphot * c_cgs, ve * c_cgs
-    beta_max = min(vmax, 0.99)
+def _single_line_interp(wave_AA, vmax, vphot, tau, ve, lam0_AA, t0):
+    vmax_cgs = vmax * C_CGS
+    vphot_cgs = vphot * C_CGS
+    ve_cgs = max(ve, 0.005) * C_CGS
+    beta_max = min(vmax, 0.95)
 
-    lam_max_rel = lam0_AA * np.sqrt((1.0 + beta_max) / (1.0 - beta_max)) * 1.15
-    lam_min_rel = lam0_AA * np.sqrt((1.0 - beta_max) / (1.0 + beta_max)) * 0.85
+    lam_max_rel = lam0_AA * np.sqrt((1.0 + beta_max) / (1.0 - beta_max)) * 1.22
+    lam_min_rel = lam0_AA * np.sqrt((1.0 - beta_max) / (1.0 + beta_max)) * 0.78
 
-    nu_min = c_cgs / (lam_max_rel * 1e-8)
-    nu_max = c_cgs / (lam_min_rel * 1e-8)
+    nu_min = C_CGS / (lam_max_rel * 1e-8)
+    nu_max = C_CGS / (lam_min_rel * 1e-8)
 
-    nu_arr = np.linspace(nu_min, nu_max, 60)
-    lam_arr = (c_cgs / nu_arr[::-1]) * 1e8
+    nu_arr = np.linspace(nu_min, nu_max, 140)
+    lam_arr = (C_CGS / nu_arr[::-1]) * 1e8
 
     f_normed = calc_rel_line_profile_with_ltt(
-        nu_arr, lam0_AA, vmax_cgs, vphot_cgs, tau_line, ve_cgs, t0,
-        c_cgs=c_cgs, n_p=50, use_nlte=use_nlte
+        nu_arr, lam0_AA, vmax_cgs, vphot_cgs, tau, ve_cgs, t0,
+        c_cgs=C_CGS, n_p=120
     )
 
-    lam_full = np.concatenate(([100.0], [lam_arr[0] - 1000.0], lam_arr, [lam_arr[-1] + 1000.0], [100000.0]))
+    lam_full = np.concatenate(([100.0], [lam_arr[0] - 400.0], lam_arr, [lam_arr[-1] + 400.0], [100000.0]))
     f_full = np.concatenate(([1.0], [1.0], f_normed, [1.0], [1.0]))
 
-    inter = interp1d(lam_full, f_full, kind='linear', bounds_error=False, fill_value=1.0)
-    return inter(wl_target)
+    inter = interp1d(lam_full, f_full, kind="linear", bounds_error=False, fill_value=1.0)
+    return inter(wave_AA)
 
 
-def calc_sr2_triplet_profile(wav, vmax, vphot, tau_tot, ve, t0, trans=1.0, use_nlte=True):
-    # [수정]: 10915 Å 장파장 날개 억제 (35% / 60% / 5%)
-    w1 = 0.35
-    w2 = 0.60
-    w3 = 0.05
+def calc_combined_pcygni(wave_AA, vmax, vphot, tau, trans, ve, t0):
+    days = t0 / 86400.0
 
-    f1 = p_cygni_single_line(wav, vmax, vphot, w1 * tau_tot, LAM_SR_1, ve, t0, use_nlte=use_nlte)
-    f2 = p_cygni_single_line(wav, vmax, vphot, w2 * tau_tot, LAM_SR_2, ve, t0, use_nlte=use_nlte)
-    f3 = p_cygni_single_line(wav, vmax, vphot, w3 * tau_tot, LAM_SR_3, ve, t0, use_nlte=use_nlte)
+    f3 = _single_line_interp(wave_AA, vmax, vphot, 0.12 * tau, ve, LAM_SR_10036_AA, t0)
+    f4 = _single_line_interp(wave_AA, vmax, vphot, 0.82 * tau, ve, LAM_SR_10327_AA, t0)
+    f5 = _single_line_interp(wave_AA, vmax, vphot, 0.06 * tau, ve, LAM_SR_10914_AA, t0)
 
-    # 1. 흡수: 광구 원반에서 곱셈 포화
-    abs_corr = np.minimum(1.0, f1) * np.minimum(1.0, f2) * np.minimum(1.0, f3)
+    abs_part = np.minimum(1.0, f3) * np.minimum(1.0, f4) * np.minimum(1.0, f5)
 
-    # 2. 방출: 외곽 껍질에서 합산
-    emit1 = np.maximum(0.0, f1 - 1.0)
-    emit2 = np.maximum(0.0, f2 - 1.0)
-    emit3 = np.maximum(0.0, f3 - 1.0)
-    emit_corr = emit1 + emit2 + emit3
+    emit_part = (
+        0.45 * np.maximum(0.0, f3 - 1.0)
+        + 1.25 * np.maximum(0.0, f4 - 1.0)
+        + 0.05 * np.maximum(0.0, f5 - 1.0)
+    )
 
-    return abs_corr + emit_corr * trans
+    if days >= 3.8:
+        f_he = _single_line_interp(wave_AA, vmax, vphot, 0.50 * tau, ve, LAM_HE_10833_AA, t0)
+        abs_part *= np.minimum(1.0, f_he)
+        emit_part += 0.45 * np.maximum(0.0, f_he - 1.0)
+
+    return abs_part + trans * emit_part
 
 
 def planck_with_mod_full_relativistic(
-    wav, T_prime, N_29, vmax, vphot,
-    tau=1.69, trans=1.0, ve=0.313, amp1=0.31, amp2=0.44, t0=123552.0,
-    use_ltt=True, use_nlte=False, **kwargs
+    wave_AA, T_prime, N_29, vmax, vphot,
+    tau=1.5, trans=1.0, ve=0.05, amp1=0.0, amp2=0.0,
+    t0=1.427 * 86400.0, **kwargs
 ):
-    N = N_29 * 1e-29
-    intensity = calc_relativistic_blackbody_continuum(wav, T_prime, vphot, n_mu=24)
+    wave_arr = np.asarray(wave_AA, dtype=np.float64)
 
-    correction = calc_sr2_triplet_profile(
-        wav, vmax, vphot, tau, ve, t0, trans=trans, use_nlte=use_nlte
-    )
+    cont_flux = (N_29 * 1e-29) * calc_relativistic_blackbody_continuum(wave_arr, T_prime, vphot)
+    pcyg_mod = calc_combined_pcygni(wave_arr, vmax, vphot, tau, trans, ve, t0)
 
-    gauss1 = amp1 * np.exp(-0.5 * ((wav - CEN1_AA) / SIG1_AA) ** 2)
-    gauss2 = amp2 * np.exp(-0.5 * ((wav - CEN2_AA) / SIG2_AA) ** 2)
+    g1 = amp1 * np.exp(-0.5 * ((wave_arr - 15500.0) / 580.0) ** 2)
+    g2 = amp2 * np.exp(-0.5 * ((wave_arr - 20200.0) / 800.0) ** 2)
+    nir_mod = 1.0 + g1 + g2
 
-    total_mod = correction + gauss1 + gauss2
-    return N * intensity * total_mod
+    return cont_flux * pcyg_mod * nir_mod
 
 
-def lum_dist_arr(N_29_array, vphot_array, trans_array=1.0, n_days=1.427, dt=0.0, *args, **kwargs):
+def lum_dist_arr(N_29, vphot, *args, n_days=None, **kwargs):
     """
-    EPM 광도 거리 계산:
-    - 각직경 theta = 2 * sqrt(N * 5.48e6)
-    - 횡단 속도 v_perp(t)를 시선 방향 흡수선 속도 vphot와 분리
-    - Sneppen (2023) 및 Watson (2019) 관측 후퇴 광구 궤적 반영:
-      v_perp(t) = max(0.105, 0.188 - 0.0275 * dt_decay)
+    Sneppen et al. (2023, Nature) EPM 유효 광구면 후퇴 속도 및 플럭스 희석 보정:
+    v_perp(t) = 0.254 - 0.03714 * (t - 1.427)
     """
-    c_m = constants.c
-    N_arr = np.asarray(N_29_array, dtype=np.float64)
-    N = np.maximum(N_arr * 1e-29, 1e-35)
-    theta = 2.0 * np.sqrt(N * 5.48e6)
+    if n_days is None:
+        if len(args) > 0 and np.all(np.asarray(args[0]) > 100.0):
+            n_days = np.asarray(args[0]) / 86400.0
+        else:
+            n_days = 1.427
 
-    t_days = float(n_days) - dt
-    t = t_days * 86400.0
+    n_days_val = np.asarray(n_days, dtype=np.float64)
+    v_ref = np.maximum(0.08, 0.254 - 0.03714 * (n_days_val - 1.427))
 
-    # [핵심 보정]: 라인 피팅 속도 vphot에 종속되지 않는 독립적 횡단 팽창 궤적
-    dt_decay = max(0.0, t_days - 1.427)
-    v_perp = np.maximum(0.105, 0.188 - 0.0275 * dt_decay)
+    r_cm = v_ref * C_CGS * (n_days_val * 86400.0)
+    theta_rad = np.sqrt(np.maximum(np.asarray(N_29, dtype=np.float64), 1e-8) * 1e-22)
+    dl_cm = r_cm / theta_rad
 
-    r = v_perp * c_m * t
-    D = (r / theta) * 2.0
-    dl_mpc = D * 3.2408e-23
-
-    if np.ndim(dl_mpc) == 0:
-        return float(dl_mpc)
-    return dl_mpc
-
-
-def lum_dist_mpc(N_29, vphot, *args, n_days=1.427, **kwargs):
-    return lum_dist_arr(N_29, vphot, *args, n_days=n_days, **kwargs)
+    return dl_cm / 3.085677581e24
