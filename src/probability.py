@@ -3,77 +3,61 @@
 
 """
 src/probability.py
-순수 베이지안 우도 및 사전확률 모듈
-- 모은하 거리 강제 구속(lp_dl) 완전 제거 (순수 EPM 독립 거리 측정)
-- 파장별 인위적 우도 가중치 완전 제거 (전 파장 동등 평가)
+고정 배치 크기(64) 전달로 torch.compile 재컴파일을 차단하고,
+FP32 복사전달 연산 후 FP64 정밀도로 chi^2를 합산하는 순수 데이터 우도 모듈
 """
 
 import numpy as np
-from src.models import planck_with_mod_full_relativistic, lum_dist_arr
+import torch
+from src.continuum import DEVICE, COMPUTE_DTYPE, ACCUM_DTYPE
+from src.models import planck_with_mod_batch_gpu
 
 
-class MCMCProbabilityWrapper:
-    def __init__(self, wave, flux, err, time_s, bounds, n_days=1.427, **kwargs):
-        self.wave = np.asarray(wave, dtype=np.float64)
-        self.flux = np.asarray(flux, dtype=np.float64)
-        self.err = np.asarray(err, dtype=np.float64)
-        self.time_s = float(time_s)
-        self.bounds = bounds
-        self.n_days = float(n_days)
+class MCMCProbabilityWrapper(object):
+    def __init__(self, wave, flux, err, days, bounds, is_photospheric=True):
+        self.wave_np = np.asarray(wave, dtype=np.float64)
+        self.flux_np = np.asarray(flux, dtype=np.float64)
+        self.err_np = np.asarray(err, dtype=np.float64)
 
-    def log_prior(self, theta):
-        # 1. 파라미터 경계 박스 점검
-        for val, (b_low, b_high) in zip(theta, self.bounds):
-            if val < b_low or val > b_high:
-                return -np.inf
+        self.wave_t = torch.tensor(self.wave_np, device=DEVICE, dtype=COMPUTE_DTYPE)
+        self.flux_t = torch.tensor(self.flux_np, device=DEVICE, dtype=COMPUTE_DTYPE)
+        self.err_t = torch.tensor(self.err_np, device=DEVICE, dtype=COMPUTE_DTYPE)
 
-        T_p, N_29, vmax, vphot, tau, trans, ve, amp1, amp2 = theta
+        self.days = float(days)
+        self.bounds = np.asarray(bounds, dtype=np.float64)
+        self.low_b = self.bounds[:, 0]
+        self.high_b = self.bounds[:, 1]
+        self.spans = self.high_b - self.low_b
+        self.is_photospheric = bool(is_photospheric)
 
-        # 2. 물리적 속도 위계 제약 (vphot < vmax)
-        if vphot >= vmax - 0.010:
-            return -np.inf
+    def evaluate_batch(self, theta_2d):
+        # 1. Flat Prior & 유체역학적 조건(v_phot < v_max - 0.02)
+        in_bounds = np.all((theta_2d >= self.low_b[None, :]) & (theta_2d <= self.high_b[None, :]), axis=1)
+        valid_vel = theta_2d[:, 3] < (theta_2d[:, 2] - 0.020)
+        valid_mask = in_bounds & valid_vel
 
-        # 3. 비물리적 거리 발산 방지를 위한 넓은 Flat Prior (20 ~ 80 Mpc)
-        # 은하 거리를 특정 값(40.7 Mpc)으로 강제 유도하는 가우시안 제약 전면 삭제
-        dl = lum_dist_arr(N_29, vphot, n_days=self.n_days)
-        if dl < 15.0 or dl > 90.0:
-            return -np.inf
+        if not np.any(valid_mask):
+            return np.full(theta_2d.shape[0], -np.inf, dtype=np.float64)
 
-        return 0.0
+        # 2. 고정 배치 크기 유지를 위해 유효하지 않은 행은 안전 중심값으로 대체 후 전체 배치를 GPU에 전달
+        safe_theta = np.where(valid_mask[:, None], theta_2d, 0.5 * (self.low_b + self.high_b)[None, :])
+        mod_t, _, _ = planck_with_mod_batch_gpu(self.wave_t, safe_theta, self.days, use_nlte=True)
 
-    def log_likelihood(self, theta):
-        T_p, N_29, vmax, vphot, tau, trans, ve, amp1, amp2 = theta
+        # 3. FP64 정밀도 업캐스팅 후 카이제곱 합산
+        diff = (self.flux_t[None, :] - mod_t) / self.err_t[None, :]
+        chi2 = torch.sum(diff.to(ACCUM_DTYPE) ** 2, dim=1).cpu().numpy()
 
-        model = planck_with_mod_full_relativistic(
-            self.wave, T_p, N_29, vmax, vphot,
-            tau=tau, trans=trans, ve=ve,
-            amp1=amp1, amp2=amp2, t0=self.time_s
-        )
-
-        # 파장별 인공 가중치 없이 관측 데이터와 측정 오차 그대로 평가
-        diff = (self.flux - model) / self.err
-        return -0.5 * np.sum(diff ** 2)
-
-    def log_probability(self, theta):
-        lp = self.log_prior(theta)
-        if not np.isfinite(lp):
-            return -np.inf
-        ll = self.log_likelihood(theta)
-        if not np.isfinite(ll):
-            return -np.inf
-        return lp + ll
-
-    def chi2_for_minimizer(self, theta):
-        lp = self.log_prior(theta)
-        if not np.isfinite(lp):
-            return 1e30
-        ll = self.log_likelihood(theta)
-        if not np.isfinite(ll):
-            return 1e30
-        return -2.0 * (lp + ll)
+        ll = -0.5 * chi2
+        return np.where(valid_mask & np.isfinite(ll), ll, -np.inf)
 
     def __call__(self, theta):
-        return self.log_probability(theta)
+        theta_arr = np.asarray(theta, dtype=np.float64)
+        if theta_arr.ndim == 1:
+            return float(self.evaluate_batch(theta_arr[None, :])[0])
+        return self.evaluate_batch(theta_arr)
 
-
-LogPost = MCMCProbabilityWrapper
+    def chi2_for_minimizer(self, theta_1d):
+        val = self.__call__(theta_1d)
+        if not np.isfinite(val):
+            return 1e30
+        return -2.0 * val

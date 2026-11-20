@@ -3,52 +3,74 @@
 
 """
 src/continuum.py
-상대론적 팽창 흑체 단색 표면 복사 플럭스 수치 적분 엔진 (Numba JIT)
+KPS 원본 SI 단위계 플랑크 연속광 수식 + RTX 5000 Pro FP32/FP64 혼합 정밀도 & torch.compile 가속
 """
 
 import numpy as np
-import numba
-from scipy import constants
+import torch
+from config.settings import H_PLANCK_SI, C_SPEED_SI, K_BOLTZ_SI
 
-h_planck = constants.h
-c_speed = constants.c
-k_B = constants.k
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+COMPUTE_DTYPE = torch.float32
+ACCUM_DTYPE = torch.float64
+DTYPE = COMPUTE_DTYPE  # 하위 모듈 호환용 기본 연산 타입
 
-
-@numba.njit(fastmath=True)
-def relativistic_blackbody_flam(wave_m, T_prime, beta, n_mu=32):
-    if beta >= 1.0 or beta < 0.0 or T_prime <= 0.0 or wave_m <= 0.0:
-        return 0.0
-
-    if beta == 0.0:
-        val_exp = (h_planck * c_speed) / (wave_m * k_B * T_prime)
-        if val_exp > 700.0:
-            return 0.0
-        return (np.pi * (2.0 * h_planck * c_speed ** 2)) / ((wave_m ** 5) * (np.exp(val_exp) - 1.0))
-
-    gamma = 1.0 / np.sqrt(1.0 - beta ** 2)
-    dmu = 1.0 / n_mu
-    sum_flux = 0.0
-
-    for i in range(n_mu):
-        mu_prime = (i + 0.5) * dmu
-        delta = gamma * (1.0 + beta * mu_prime)
-        val_exp = (h_planck * c_speed) / (delta * wave_m * k_B * T_prime)
-        if val_exp > 700.0:
-            b_lam = 0.0
-        else:
-            b_lam = (2.0 * h_planck * c_speed ** 2) / ((wave_m ** 5) * (np.exp(val_exp) - 1.0))
-
-        sum_flux += (1.0 / (delta ** 3)) * b_lam * (mu_prime + beta) * dmu
-
-    return 2.0 * np.pi * gamma * sum_flux
+if hasattr(torch, "_dynamo"):
+    torch._dynamo.config.suppress_errors = True
 
 
-@numba.njit(fastmath=True)
-def calc_relativistic_blackbody_continuum(wave_AA, T_prime, beta, n_mu=32):
-    wave_m = wave_AA * 1e-10
-    n = len(wave_m)
-    flux = np.zeros(n)
-    for i in range(n):
-        flux[i] = relativistic_blackbody_flam(wave_m[i], T_prime, beta, n_mu)
-    return flux
+def maybe_compile(fn):
+    if not torch.cuda.is_available():
+        return fn
+    try:
+        return torch.compile(fn, mode="default", dynamic=True)
+    except Exception:
+        return fn
+
+
+_MU_N, _MU_W = np.polynomial.legendre.leggauss(32)
+GL_MU_NODES = torch.tensor(0.5 * (_MU_N + 1.0), device=DEVICE, dtype=COMPUTE_DTYPE)
+GL_MU_WEIGHTS = torch.tensor(0.5 * _MU_W, device=DEVICE, dtype=COMPUTE_DTYPE)
+
+C1_SI = float(2.0 * H_PLANCK_SI * (C_SPEED_SI ** 2))
+C2_SI = float((H_PLANCK_SI * C_SPEED_SI) / K_BOLTZ_SI)
+
+
+@maybe_compile
+def _blackbody_kernel(wave_aa_t, T_prime_t, beta_t):
+    beta = torch.clamp(beta_t, 1e-5, 0.92)
+    gamma = 1.0 / torch.sqrt(1.0 - beta * beta)
+
+    beta_3d = beta[:, None, None]
+    gamma_3d = gamma[:, None, None]
+    T_3d = torch.clamp(T_prime_t[:, None, None], min=500.0)
+
+    lam_m = (wave_aa_t * 1e-10)[None, :, None]
+    lam_m5 = lam_m ** 5
+
+    mu_p = GL_MU_NODES[None, None, :]
+    w_p = GL_MU_WEIGHTS[None, None, :]
+
+    delta = gamma_3d * (1.0 + beta_3d * mu_p)
+    # float32 지수 오버플로(exp(88.7)) 방지를 위해 상한 80.0 클램핑
+    exponent = torch.clamp(C2_SI / (delta * lam_m * T_3d), max=80.0)
+
+    b_lam = (C1_SI / lam_m5) / torch.expm1(exponent)
+    integrand = (b_lam / (delta ** 3)) * (mu_p + beta_3d)
+    integral = torch.sum(w_p * integrand, dim=-1)
+
+    front = (2.0 * np.pi) * gamma
+    return front[:, None] * integral
+
+
+@torch.no_grad()
+def calc_relativistic_blackbody_batch_gpu(wave_aa_t, T_prime_t, beta_t):
+    return _blackbody_kernel(wave_aa_t, T_prime_t, beta_t)
+
+
+def calc_relativistic_blackbody_continuum(wave_AA, T_prime, beta):
+    w_t = torch.as_tensor(wave_AA, device=DEVICE, dtype=COMPUTE_DTYPE)
+    t_t = torch.tensor([float(T_prime)], device=DEVICE, dtype=COMPUTE_DTYPE)
+    b_t = torch.tensor([float(beta)], device=DEVICE, dtype=COMPUTE_DTYPE)
+    res = calc_relativistic_blackbody_batch_gpu(w_t, t_t, b_t)
+    return res[0].cpu().numpy().astype(np.float64)

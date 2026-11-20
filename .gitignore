@@ -1,7 +1,20 @@
-venv/
-ENV/
 __pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+.idea/
+.vscode/
+
+# 로그, 백업, 임시파일, 대용량 MCMC 체인(.npy) 및 관측 원시(.dat)
 *.log
-nohup.out
-.DS_Store
+*.bak
+*.tmp
+temp_spectrum.dat
+output_results/**/*.npy
+output_results/**/*.dat
+scripts/output/

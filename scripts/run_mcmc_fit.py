@@ -3,23 +3,16 @@
 
 """
 scripts/run_mcmc_fit.py
-킬로노바 AT2017gfo MCMC 피팅 엔진 (96 Walkers x 20,000 Steps)
-- 1일차 부 모드(vphot=0.171) 제거 및 2/4일차 vphot 경계 여유 확보
+10-에포크(+1.43d ~ +10.40d) torch.compile 가속 GPU 상대론적 NLTE MCMC 피팅 및 수렴 진단 실행기
 """
 
 import os
 import sys
-
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
 import json
+import time
 import warnings
-import multiprocessing as mp
 import numpy as np
+import torch
 from scipy.optimize import minimize
 import emcee
 
@@ -27,215 +20,217 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.data_loader import load_data
-from src.probability import MCMCProbabilityWrapper
-from src.models import (
-    planck_with_mod_full_relativistic,
-    lum_dist_arr
+from config.settings import (
+    PHASES_CONFIG, PARAM_NAMES, N_WALKERS, N_STEPS, BURN_IN, THIN_STEP,
+    Z_COSMIC_MEAN, Z_COSMIC_ERR, Q0_DECEL
 )
+from src.data_loader import load_clean_spectrum
+from src.continuum import DEVICE
+from src.models import planck_with_mod_full_relativistic, lum_dist_arr
+from src.probability import MCMCProbabilityWrapper
 
 warnings.filterwarnings("ignore")
 
-TARGET_CASE = "Case1_withLTT_PureLTE"
-N_CORES = 48
-N_WALKERS = 96
-N_STEPS = 20000
-BURN_IN = 10000
-THIN_STEP = 15
 
-PARAM_NAMES = ["T_prime", "N_29", "vmax", "vphot", "tau", "trans", "ve", "amp1", "amp2"]
-CORNER_LABELS = [
-    r"$T^\prime$", r"$N_{29}$", r"$v_{\max}$", r"$v_{\text{phot}}$",
-    r"$\tau$", r"$\text{trans}$", r"$v_e$", r"$\text{amp}_1$", r"$\text{amp}_2$"
-]
+def compute_convergence_diagnostics(sampler, burn_in=10000):
+    """
+    9차원 MCMC 체인의 평균 수락률(a_f), 자기상관 시간(tau), Split Gelman-Rubin 통계량(R-hat) 산출
+    """
+    acc_frac = float(np.mean(sampler.acceptance_fraction))
 
-PHASES = [
-    {
-        "label": "Phase +1.43d (OB1)", "days": 1.427,
-        "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57983.969_Phase%2B1.43d_deredz.dat",
-        "file": "OB1_1.43d.dat",
-        "bounds": [
-            (4400.0, 4750.0),
-            (0.45, 0.60),
-            (0.37, 0.44),
-            (0.182, 0.225),  # 0.171 부 모드 차단 -> 주 모드(0.196) 단일 가우시안 완성
-            (0.60, 2.00),
-            (0.00, 0.10),
-            (0.08, 0.18),
-            (0.04, 0.18),
-            (0.28, 0.46),
-        ],
-        "p_init": [4566.0, 0.511, 0.391, 0.196, 1.20, 0.001, 0.120, 0.099, 0.368]
-    },
-    {
-        "label": "Phase +2.42d (OB2)", "days": 2.417,
-        "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57984.969_Phase%2B2.42d_deredz.dat",
-        "file": "OB2_2.42d.dat",
-        "bounds": [
-            (3150.0, 3600.0),
-            (0.95, 1.30),
-            (0.31, 0.40),
-            (0.105, 0.175),  # 0.130 하한선 접촉 해소 -> 0.105로 여유 개방
-            (0.60, 2.20),
-            (0.10, 1.20),
-            (0.06, 0.16),
-            (0.05, 0.20),
-            (0.15, 0.32),
-        ],
-        "p_init": [3398.0, 1.101, 0.345, 0.130, 1.22, 0.31, 0.109, 0.119, 0.225]
-    },
-    {
-        "label": "Phase +3.41d (OB3)", "days": 3.413,
-        "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57985.974_Phase%2B3.41d_deredz.dat",
-        "file": "OB3_3.41d.dat",
-        "bounds": [
-            (2750.0, 3100.0),
-            (1.30, 1.65),
-            (0.28, 0.37),
-            (0.12, 0.18),
-            (1.00, 3.00),
-            (1.50, 3.00),
-            (0.025, 0.075),
-            (0.16, 0.32),
-            (0.36, 0.56),
-        ],
-        "p_init": [2921.0, 1.435, 0.321, 0.151, 1.70, 2.11, 0.046, 0.236, 0.458]
-    },
-    {
-        "label": "Phase +4.40d (OB4)", "days": 4.403,
-        "url": "https://sid.erda.dk/share_redirect/df1fMhon6Z/dereddened%2Bderedshifted_spectra/AT2017gfo_ENGRAVE_v1.0_XSHOOTER_MJD-57986.974_Phase%2B4.40d_deredz.dat",
-        "file": "OB4_4.40d.dat",
-        "bounds": [
-            (2500.0, 2750.0),
-            (1.45, 1.80),
-            (0.22, 0.32),
-            (0.14, 0.21),    # 0.180 상한선 접촉 해소 -> 0.21로 여유 개방
-            (0.20, 0.90),
-            (6.50, 12.00),
-            (0.05, 0.14),
-            (0.22, 0.40),
-            (0.38, 0.56),
-        ],
-        "p_init": [2616.0, 1.622, 0.256, 0.178, 0.47, 8.72, 0.091, 0.304, 0.473]
-    }
-]
+    try:
+        tau_arr = sampler.get_autocorr_time(discard=burn_in, tol=0)
+        tau_list = [float(t) for t in tau_arr]
+        tau_max = float(np.max(tau_arr))
+    except Exception:
+        tau_list = [None] * sampler.ndim
+        tau_max = np.nan
 
+    post_chain = sampler.get_chain(discard=burn_in)
+    n_half = post_chain.shape[0] // 2
+    split_chains = np.concatenate([post_chain[:n_half], post_chain[n_half:2 * n_half]], axis=1)
+    N = split_chains.shape[0]
 
-def run_single_epoch(p_info, pool, target_save_dir):
-    label = p_info["label"]
-    days = p_info["days"]
-    url = p_info["url"]
-    local_file = os.path.join(target_save_dir, p_info["file"])
-    bounds = p_info["bounds"]
-    p_init = np.array(p_info["p_init"], dtype=np.float64)
-    time_s = days * 86400.0
+    W = np.mean(np.var(split_chains, axis=0, ddof=1), axis=0)
+    B_over_n = np.var(np.mean(split_chains, axis=0), axis=0, ddof=1)
+    var_hat = ((N - 1.0) / N) * W + B_over_n
+    r_hat = np.sqrt(var_hat / np.maximum(W, 1e-30))
 
-    bounds_arr = np.array(bounds, dtype=np.float64)
-    low_b, high_b = bounds_arr[:, 0], bounds_arr[:, 1]
-    spans = high_b - low_b
-
-    print(f"\n--> [{label}] 데이터 로드 및 전역 최적화...")
-    wave, flux, err = load_data(url, local_file)
-    eff_err = np.maximum(err, 0.05 * np.abs(flux))
-    x_fit, y_fit, err_fit = wave[::6], flux[::6], eff_err[::6]
-
-    prob_wrapper = MCMCProbabilityWrapper(
-        x_fit, y_fit, err_fit, time_s, bounds, n_days=days
-    )
-
-    res = minimize(
-        prob_wrapper.chi2_for_minimizer, p_init, method="Nelder-Mead",
-        options={"maxiter": 2000, "xatol": 1e-4, "fatol": 1e-3}
-    )
-    center = res.x if (res.success and np.isfinite(prob_wrapper.log_prior(res.x))) else p_init
-    center = np.clip(center, low_b + 0.02 * spans, high_b - 0.02 * spans)
-
-    ndim = len(bounds)
-    pos = []
-    for _ in range(N_WALKERS):
-        for _try in range(2000):
-            cand = center + 0.0008 * spans * np.random.randn(ndim)
-            cand = np.clip(cand, low_b + 1e-4 * spans, high_b - 1e-4 * spans)
-            if np.isfinite(prob_wrapper.log_prior(cand)):
-                pos.append(cand)
-                break
-        else:
-            pos.append(center)
-    pos = np.array(pos)
-
-    print(f"    MCMC 샘플링 중 ({N_WALKERS} Walkers x {N_STEPS} Steps, Processes: {N_CORES})...")
-    sampler = emcee.EnsembleSampler(
-        N_WALKERS, ndim, prob_wrapper, pool=pool,
-        moves=emcee.moves.StretchMove(a=1.8)
-    )
-    sampler.run_mcmc(pos, N_STEPS, progress=True)
-
-    flat_samples = sampler.get_chain(discard=BURN_IN, thin=THIN_STEP, flat=True)
-    np.save(os.path.join(target_save_dir, f"samples_{days:.3f}d.npy"), flat_samples)
-
-    popt = {}
-    for i, name in enumerate(PARAM_NAMES):
-        popt[name] = float(np.median(flat_samples[:, i]))
-
-    model_fit = planck_with_mod_full_relativistic(
-        x_fit, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
-        tau=popt["tau"], trans=popt["trans"], ve=popt["ve"],
-        amp1=popt["amp1"], amp2=popt["amp2"], t0=time_s
-    )
-    chi2_val = float(np.sum(((y_fit - model_fit) / err_fit) ** 2))
-    red_chi2 = chi2_val / max(1, len(x_fit) - ndim)
-
-    dl_samples = lum_dist_arr(flat_samples[:, 1], flat_samples[:, 3], n_days=days)
-    dl_med = float(np.median(dl_samples))
-
-    print(
-        f"    [완료: {label}] Red.Chi2={red_chi2:.2f} | T'={popt['T_prime']:.0f}K | "
-        f"N_29={popt['N_29']:.2f} | D_L={dl_med:.2f} Mpc | tau={popt['tau']:.2f} | trans={popt['trans']:.2f}"
-    )
-
+    total_steps = post_chain.shape[0] + burn_in
     return {
-        "summary": {
-            "days": days, "label": label, "popt": popt,
-            "red_chi2": red_chi2, "dl_med": dl_med
-        },
-        "spectrum": {
-            "days": days, "label": label,
-            "wave": wave.tolist(), "flux": flux.tolist(),
-            "x_fit": x_fit.tolist(), "model_fit": model_fit.tolist()
-        }
+        "acceptance_fraction": acc_frac,
+        "autocorr_time_tau_per_param": tau_list,
+        "max_autocorr_time_tau": tau_max if np.isfinite(tau_max) else None,
+        "n_steps_over_tau": float(total_steps / tau_max) if np.isfinite(tau_max) else None,
+        "r_hat_per_param": [float(r) for r in r_hat],
+        "max_r_hat": float(np.max(r_hat)),
     }
 
 
 def main():
-    target_save_dir = os.path.join(PROJECT_ROOT, "output_results", TARGET_CASE)
-    os.makedirs(target_save_dir, exist_ok=True)
+    out_dir = os.path.join(PROJECT_ROOT, "output_results", "GPU_10Epoch_Relativistic_NLTE")
+    os.makedirs(out_dir, exist_ok=True)
 
-    print("========================================================")
-    print(f" [가동 시작: {TARGET_CASE}] (96 Walkers x 20,000 Steps)")
-    print(f" 병렬 프로세스 할당: {N_CORES} 코어 (1:1 매칭)")
-    print("========================================================")
+    print("==========================================================================", flush=True)
+    print(" [AT2017gfo 10-에포크 torch.compile 가속 GPU MCMC & 정량 수렴 진단 파이프라인]", flush=True)
+    print(f"  * 연산 디바이스 : {DEVICE}" + (f" ({torch.cuda.get_device_name(0)})" if torch.cuda.is_available() else ""), flush=True)
+    print(f"  * MCMC 규격    : {N_WALKERS} Walkers (Half-Batch={N_WALKERS//2}) x {N_STEPS} Steps (Burn-in: {BURN_IN})", flush=True)
+    print("==========================================================================\n", flush=True)
 
+    rng = np.random.default_rng(2026)
     results_summary = []
-    spectra_data = []
+    photospheric_dl_chains = []
 
-    with mp.Pool(processes=N_CORES) as pool:
-        for p_info in PHASES:
-            res = run_single_epoch(p_info, pool, target_save_dir)
-            results_summary.append(res["summary"])
-            spectra_data.append(res["spectrum"])
+    for idx, p_cfg in enumerate(PHASES_CONFIG):
+        t_start = time.time()
+        label = p_cfg["label"]
+        days = p_cfg["days"]
+        local_path = os.path.join(out_dir, p_cfg["filename"])
 
-    with open(os.path.join(target_save_dir, "results_summary.json"), "w", encoding="utf-8") as f:
-        json.dump(results_summary, f, indent=2)
+        print(f"--> [{idx+1}/10] {label} 데이터 로드 및 Nelder-Mead 전역 최적화...", flush=True)
+        w_fit, f_fit, e_fit, _, _ = load_clean_spectrum(p_cfg["url"], local_path, subsample_step=8)
 
-    with open(os.path.join(target_save_dir, "spectra_data.json"), "w", encoding="utf-8") as f:
-        json.dump(spectra_data, f)
+        prob_fn = MCMCProbabilityWrapper(
+            w_fit, f_fit, e_fit, days=days,
+            bounds=p_cfg["bounds"], is_photospheric=p_cfg["is_photospheric"]
+        )
 
-    with open(os.path.join(target_save_dir, "labels_dict.json"), "w", encoding="utf-8") as f:
-        json.dump({"labels": PARAM_NAMES, "corner_labels": CORNER_LABELS}, f, indent=2)
+        init_guess = np.array(p_cfg["init_guess"], dtype=np.float64)
+        best_opt_x = init_guess.copy()
+        best_opt_val = prob_fn.chi2_for_minimizer(init_guess)
 
-    print("\n[완료] 전체 에포크 MCMC 샘플링 및 데이터 저장이 정상 종료되었습니다.")
+        for trial in range(4):
+            start_pt = init_guess if trial == 0 else np.clip(
+                init_guess + 0.04 * prob_fn.spans * rng.standard_normal(len(init_guess)),
+                prob_fn.low_b + 0.02 * prob_fn.spans,
+                prob_fn.high_b - 0.02 * prob_fn.spans
+            )
+            opt_res = minimize(
+                prob_fn.chi2_for_minimizer, start_pt, method="Nelder-Mead",
+                options={"maxiter": 4000, "xatol": 1e-4, "fatol": 1e-4}
+            )
+            if opt_res.fun < best_opt_val and np.isfinite(prob_fn(opt_res.x)):
+                best_opt_val = opt_res.fun
+                best_opt_x = opt_res.x.copy()
+
+        ndim = len(PARAM_NAMES)
+        pos = []
+        for _ in range(N_WALKERS):
+            for _try in range(3000):
+                cand = best_opt_x + 0.01 * prob_fn.spans * rng.standard_normal(ndim)
+                cand = np.clip(cand, prob_fn.low_b + 0.003 * prob_fn.spans, prob_fn.high_b - 0.003 * prob_fn.spans)
+                if cand[3] < cand[2] - 0.022 and np.isfinite(prob_fn(cand)):
+                    pos.append(cand)
+                    break
+            else:
+                pos.append(best_opt_x)
+        pos = np.array(pos, dtype=np.float64)
+
+        # 고정 배치 크기(N_WALKERS // 2 = 64) 1회 워밍업으로 torch.compile 커널 컴파일 완료
+        _ = prob_fn.evaluate_batch(pos[: N_WALKERS // 2])
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        print(f"    최적 중심점: T'={best_opt_x[0]:.0f}K, N29={best_opt_x[1]:.3f}, vphot={best_opt_x[3]:.3f}c, trans={best_opt_x[5]:.2f}", flush=True)
+        print(f"    GPU MCMC 샘플링 가동 ({N_WALKERS} Walkers x {N_STEPS} Steps)...", flush=True)
+
+        moves = [
+            (emcee.moves.DEMove(), 0.8),
+            (emcee.moves.DESnookerMove(), 0.2),
+        ]
+        sampler = emcee.EnsembleSampler(N_WALKERS, ndim, prob_fn, vectorize=True, moves=moves)
+        sampler.run_mcmc(pos, N_STEPS, progress=True)
+
+        conv_stats = compute_convergence_diagnostics(sampler, burn_in=BURN_IN)
+        flat_samples = sampler.get_chain(discard=BURN_IN, thin=THIN_STEP, flat=True)
+        samples_path = os.path.join(out_dir, f"samples_{days:.2f}d.npy")
+        np.save(samples_path, flat_samples)
+
+        popt = {}
+        param_stats = {}
+        for j, pname in enumerate(PARAM_NAMES):
+            p16, p50, p84 = np.percentile(flat_samples[:, j], [16, 50, 84])
+            popt[pname] = float(p50)
+            param_stats[pname] = {
+                "median": float(p50),
+                "err_minus": float(p50 - p16),
+                "err_plus": float(p84 - p50),
+            }
+
+        dl_chain = lum_dist_arr(flat_samples[:, 1], flat_samples[:, 3], n_days=days)
+        dl_p16, dl_p50, dl_p84 = np.percentile(dl_chain, [16, 50, 84])
+        if p_cfg["is_photospheric"]:
+            photospheric_dl_chains.append(dl_chain)
+
+        mod_best = planck_with_mod_full_relativistic(
+            w_fit, popt["T_prime"], popt["N_29"], popt["vmax"], popt["vphot"],
+            tau=popt["tau"], trans=popt["trans"], ve=popt["ve"],
+            amp1=popt["amp1"], amp2=popt["amp2"], t0=days * 86400.0, use_nlte=True
+        )
+        red_chi2 = float(np.sum(((f_fit - mod_best) / e_fit) ** 2) / max(1, len(w_fit) - ndim))
+        elapsed = time.time() - t_start
+
+        tau_str = f"{conv_stats['max_autocorr_time_tau']:.1f}" if conv_stats["max_autocorr_time_tau"] else "N/A"
+        print(
+            f"  ✓ [{label}] 완료 ({elapsed:.1f}s) | Red.Chi2={red_chi2:.2f} | "
+            f"a_f={conv_stats['acceptance_fraction']:.2f} | max_tau={tau_str} | max_Rhat={conv_stats['max_r_hat']:.4f}\n"
+            f"    -> T'={popt['T_prime']:.0f}K | N29={popt['N_29']:.3f} | vphot={popt['vphot']:.3f}c | "
+            f"trans={popt['trans']:.2f} | D_L={dl_p50:.1f} Mpc\n",
+            flush=True
+        )
+
+        results_summary.append({
+            "label": label,
+            "days": float(days),
+            "filename": p_cfg["filename"],
+            "is_photospheric": p_cfg["is_photospheric"],
+            "reduced_chi2": red_chi2,
+            "dl_med": float(dl_p50),
+            "dl_err_minus": float(dl_p50 - dl_p16),
+            "dl_err_plus": float(dl_p84 - dl_p50),
+            "convergence": conv_stats,
+            "popt": popt,
+            "parameters": param_stats,
+        })
+
+    min_len = min(len(c) for c in photospheric_dl_chains)
+    chains_trim = np.array([c[:min_len] for c in photospheric_dl_chains])
+    vars_ep = np.var(chains_trim, axis=1, keepdims=True)
+    inv_vars = 1.0 / np.maximum(vars_ep, 0.1)
+    weights_ep = inv_vars / np.sum(inv_vars)
+    dl_comb = np.sum(chains_trim * weights_ep, axis=0)
+
+    z_samples = rng.normal(Z_COSMIC_MEAN, Z_COSMIC_ERR, size=min_len)
+    c_kms = 299792.458
+    h0_comb = (c_kms * z_samples / dl_comb) * (1.0 + 0.5 * (1.0 - Q0_DECEL) * z_samples)
+
+    dl_c16, dl_c50, dl_c84 = np.percentile(dl_comb, [16, 50, 84])
+    h0_c16, h0_c50, h0_c84 = np.percentile(h0_comb, [16, 50, 84])
+
+    final_output = {
+        "Combined_Photospheric_DL_Mpc": {
+            "median": float(dl_c50),
+            "err_minus": float(dl_c50 - dl_c16),
+            "err_plus": float(dl_c84 - dl_c50),
+        },
+        "Combined_H0_km_s_Mpc": {
+            "median": float(h0_c50),
+            "err_minus": float(h0_c50 - h0_c16),
+            "err_plus": float(h0_c84 - h0_c50),
+        },
+        "epochs": results_summary,
+    }
+
+    summary_path = os.path.join(out_dir, "fit_summary_10epochs.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(final_output, f, indent=2)
+
+    print("==========================================================================", flush=True)
+    print(" [10-에포크 torch.compile 가속 MCMC 샘플링 및 수렴 진단 완료]", flush=True)
+    print(f"  * 결합 광도 거리 D_L (1~4일차) = {dl_c50:.2f} (+{dl_c84 - dl_c50:.2f} / -{dl_c50 - dl_c16:.2f}) Mpc", flush=True)
+    print(f"  * 결합 허블 상수 H_0           = {h0_c50:.2f} (+{h0_c84 - h0_c50:.2f} / -{h0_c50 - h0_c16:.2f}) km/s/Mpc", flush=True)
+    print("==========================================================================\n", flush=True)
 
 
 if __name__ == "__main__":
-    mp.freeze_support()
     main()

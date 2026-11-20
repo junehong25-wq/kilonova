@@ -1,0 +1,59 @@
+{
+  "original_spectropolarimetric_findings": {
+    "days": [
+      1.427,
+      2.417,
+      3.413,
+      4.403
+    ],
+    "tau_es_from_mcmc_density": [
+      0.8512063772241147,
+      0.27490265534172514,
+      0.07172370526874647,
+      0.058403092628357495
+    ],
+    "relativistic_aberration_polarization_suppression_pct": [
+      13.264454184901087,
+      6.337170934279957,
+      10.777314525525217,
+      7.422656996216126
+    ],
+    "trough_spherical_90deg_AA": [
+      9716.35150166852,
+      10487.208008898777,
+      10942.714126807565,
+      11001.11234705228
+    ],
+    "trough_polar_cone_30deg_AA": [
+      9716.35150166852,
+      10533.926585094548,
+      10942.714126807565,
+      10931.03448275862
+    ],
+    "trough_pure_Sr_control_AA": [
+      9716.35150166852,
+      10428.80978865406,
+      10744.16017797553,
+      10732.480533926584
+    ],
+    "redward_shift_from_He_I_AA": [
+      0.0,
+      58.39822024471687,
+      198.55394883203553,
+      268.63181312569577
+    ]
+  },
+  "self_consistent_error_budget_percent": {
+    "mcmc_4epoch_radial_DL_scatter_pct": 0.7509187955708649,
+    "statistical_spectral_fit_pct": 0.3483992946998328,
+    "geometric_asphericity_unconstrained_pct": 4.410602732676856,
+    "geometric_asphericity_constrained_pct": 1.6020390377888654,
+    "host_peculiar_velocity_pct": 4.969574036511156,
+    "total_H0_uncertainty_pct": 5.227792721268971
+  },
+  "H0_constrained_km_s_Mpc": {
+    "median": 68.22860939827368,
+    "err_minus": 3.5379538122756884,
+    "err_plus": 3.5957467396162883
+  }
+}
