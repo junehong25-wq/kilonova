@@ -29,23 +29,23 @@ CORNER_LABELS = [
 
 samples_all = np.load(os.path.join(OUT_DIR, "samples_1.43d.npy"))
 
-# 부 모드(T' < 4500K, vmax > 0.43c, tau > 0.52) 샘플이 trans 축에서 갈라진 등고선을 만드는 것을 방지하기 위해
-# 시각화용 등고선 계산에는 주 모드 샘플만 추출 (제목 통계량은 전체 samples_all 유지)
+# T' (~4520K) 및 v_phot (~0.200c) 잔여 부 모드 꼬리를 제거한 주 모드 마스크
 primary_mask = (
-    (samples_all[:, 0] >= 4500.0) &
+    (samples_all[:, 0] >= 4545.0) &
     (samples_all[:, 2] <= 0.435) &
+    (samples_all[:, 3] >= 0.205) &
     (samples_all[:, 4] <= 0.500) &
-    (samples_all[:, 6] >= 0.110)
+    (samples_all[:, 6] >= 0.115)
 )
-samples_primary = samples_all[primary_mask]
+samples_primary = samples_all[primary_mask].copy()
 
 plot_range = [
-    (4510.0, 4695.0),    # T'
+    (4530.0, 4695.0),    # T': ~4520K 잔여 꼬리 배제 및 우측 여백 확보
     (0.456, 0.494),      # N29
     (0.386, 0.428),      # vmax
-    (0.196, 0.232),      # vphot
+    (0.203, 0.232),      # vphot: ~0.200c 잔여 꼬리 배제
     (0.315, 0.475),      # tau
-    (-0.010, 0.165),     # trans: 0.0 왼쪽에 미세 여백(-0.01)을 두고 상단을 0.165로 줌인해 찌그러짐 해소
+    (-0.025, 0.160),     # trans: 0.00 좌측 기준선 여백 확보
     (0.120, 0.220),      # ve
     (0.095, 0.205),      # amp1
     (0.355, 0.530),      # amp2
