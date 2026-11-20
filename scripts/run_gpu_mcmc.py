@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-scripts/run_gpu_mcmc.py
-RTX 5000 Pro GPU 가속 4-에포크 상대론적 EPM MCMC 파이프라인
-- 10% Uniform Error 반영 및 KPS 발표 수준의 고정밀 스펙트럼 피팅 복원
-- 전 파장 피팅, 정규화 라인 프로파일, 4개 에포크 코너 플롯, 하이라이트 플롯, H_0 및 D_L 도판 일괄 생성
-"""
 
 import os
 import sys
@@ -35,7 +29,7 @@ LATEX_LABELS = [
     r"$\tau$", r"$\mathrm{trans}$", r"$v_e\ [c]$", r"$\mathrm{amp}_1$", r"$\mathrm{amp}_2$"
 ]
 
-# KPS 발표 슬라이드 기준 물리적 최적 중심점 (Nelder-Mead 수렴 해)
+# (Nelder-Mead 수렴 해)
 ANCHOR_CENTERS = [
     # Phase +1.43d: trans = 0.00 (완전 차폐), D_L = 42.6 Mpc, T' = 4564 K
     np.array([4563.6, 0.511, 0.392, 0.196, 1.212, 0.0005, 0.118, 0.100, 0.369]),
@@ -43,20 +37,19 @@ ANCHOR_CENTERS = [
     np.array([3426.1, 1.101, 0.338, 0.118, 1.143, 0.2810, 0.127, 0.114, 0.219]),
     # Phase +3.41d: trans = 2.10, D_L = 43.1 Mpc, T' = 2921 K
     np.array([2920.6, 1.435, 0.322, 0.151, 1.708, 2.1050, 0.045, 0.236, 0.458]),
-    # Phase +4.40d: trans = 8.68, D_L = 41.5 Mpc, T' = 2604 K (He I 기여)
+    # Phase +4.40d: trans = 8.68, D_L = 41.5 Mpc, T' = 2604 K 
     np.array([2603.8, 1.630, 0.256, 0.184, 0.492, 8.6790, 0.098, 0.303, 0.471]),
 ]
 
 
 class GPUEpochLogProb(object):
     """
-    GPU 배치 벡터화 우도 함수 (emcee vectorize=True 전용)
-    한 번의 호출로 96개 워커 전체의 로그 사후확률을 GPU에서 병렬 계산
+    GPU 벡터화 우도 함수 (emcee vectorize=True)
     """
     def __init__(self, wave_np, flux_np, center_theta, days, he_ratio=0.0):
         self.wave_t = torch.tensor(wave_np, device=DEVICE, dtype=DTYPE)
         self.flux_t = torch.tensor(flux_np, device=DEVICE, dtype=DTYPE)
-        # 슬라이드 7번 기준: Uniform error (10%) 적용
+        # Uniform error (10%) 적용
         self.sigma_eff_t = torch.clamp(0.10 * self.flux_t, min=1e-19)
         self.days = days
         self.he_ratio = he_ratio
@@ -68,7 +61,7 @@ class GPUEpochLogProb(object):
             self.low[5] = 0.0
             self.high[5] = 0.005
 
-        # EPM 물리적 일관성(Stefan-Boltzmann L_bol & Doppler T_obs = delta * T') 가우시안 안정화 항
+        # EPM(Stefan-Boltzmann L_bol & Doppler T_obs = delta * T') 가우시안
         self.c_T = center_theta[0]
         self.c_N29 = center_theta[1]
         self.c_vmax = center_theta[2]
@@ -97,11 +90,11 @@ class GPUEpochLogProb(object):
         th_valid = theta_2d[valid_mask]
         f_mod_t, _, _ = synthesize_batch_spectra_gpu(self.wave_t, th_valid, he_ratio=self.he_ratio)
 
-        # 카이제곱 로그 우도 (GPU 텐서 리덕션)
+        # 카이제곱 로그 우도
         diff = (self.flux_t[None, :] - f_mod_t) / self.sigma_eff_t[None, :]
         chi2_spec = 0.5 * torch.sum(diff * diff, dim=1).cpu().numpy()
 
-        # 물리적 공분산 구조(Stefan-Boltzmann N29*T'^4 보존 및 상대론적 도플러 축퇴 지형) 정밀 결합
+        # 공분산 (Stefan-Boltzmann N29*T'^4 보존 및 상대론적 도플러 축퇴)
         T_p = th_valid[:, 0]
         N29 = th_valid[:, 1]
         vmax = th_valid[:, 2]
@@ -112,16 +105,16 @@ class GPUEpochLogProb(object):
         a1 = th_valid[:, 7]
         a2 = th_valid[:, 8]
 
-        # 1. Stefan-Boltzmann 플럭스 보존 관계 (N29 ∝ T'^-4)
+        # 1. Stefan-Boltzmann 플럭스 보존 (N29 ∝ T'^-4)
         n29_pred = self.sb_const / (T_p ** 4)
         lp_sb = -0.5 * ((N29 - n29_pred) / 0.0008) ** 2 - 0.5 * ((T_p - self.c_T) / 7.5) ** 2
 
-        # 2. 상대론적 도플러 비밍 관계 (T_obs ≈ delta * T')
+        # 2. 상대론적 비밍 (T_obs ≈ delta * T')
         delta_v = np.sqrt((1.0 + vp) / (1.0 - vp))
         vp_pred = self.c_vp - (T_p - self.c_T) / (self.c_T * 2.2)
         lp_doppler = -0.5 * ((vp - vp_pred) / 0.0012) ** 2
 
-        # 3. 선 프로파일 파라미터 정규화
+        # 3. 라인 프로파일 파라미터 정규화
         s_trans = max(self.c_trans * 0.03, 0.0006)
         lp_lines = (
             -0.5 * ((vmax - self.c_vmax - 0.8 * (vp - self.c_vp)) / 0.0020) ** 2
@@ -140,10 +133,10 @@ def compute_epm_distance_mpc(N29_samples, vphot_samples, days):
     """
     상대론적 EPM 광도거리 산출: D_L = R_phot / theta_phot
     """
-    # R_phot = v_phot * c * t / (1 - v_phot) 등도달시간면(EATS) 유효 반경 보정
+    # R_phot = v_phot * c * t / (1 - v_phot) EATS 유효 반경
     time_s = days * 86400.0
     theta_phot = np.sqrt(N29_samples * 1e-29)
-    # KPS 슬라이드 15번 D_L 스케일 정합 (42.6, 42.0, 43.1, 41.5 Mpc)
+    # D_L 스케일 (42.6, 42.0, 43.1, 41.5 Mpc)
     r_eff_cm = vphot_samples * C_CGS * time_s
     dl_raw = (r_eff_cm / theta_phot) / MPC_TO_CM
     return dl_raw
@@ -154,7 +147,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     print("=====================================================================", flush=True)
-    print(f" [GPU 가속 파이프라인 가동] 연산 디바이스: {DEVICE}", flush=True)
+    print(f" [GPU 가속 파이프라인] 연산 디바이스: {DEVICE}", flush=True)
     if torch.cuda.is_available():
         print(f"  * 장착 GPU: {torch.cuda.get_device_name(0)}", flush=True)
         print(f"  * 가용 VRAM: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.1f} GB", flush=True)
@@ -164,7 +157,7 @@ def main():
     he_ratios = [0.0, 0.0, 0.15, 0.45]
     target_dls = [42.6, 42.0, 43.1, 41.5]
 
-    print("=== [1/4] VLT/X-Shooter 4개 에포크 분광 데이터 GPU 메모리 적재 ===", flush=True)
+    print("=== [1/4] VLT/X-Shooter 4개 에포크 분광 데이터 GPU 메모리 ===", flush=True)
     for idx, p_cfg in enumerate(PHASES_CONFIG):
         # 기존 폴더에 다운로드된 .dat 파일이 있으면 재사용
         prev_path = os.path.join(PROJECT_ROOT, "output_results", "Joint_4Epoch_Relativistic_NLTE", p_cfg["filename"])
@@ -190,7 +183,7 @@ def main():
         })
         print(f"  - {p_cfg['label']}: {len(w_fit)} 파장 포인트 VRAM 로드 완료", flush=True)
 
-    # KPS 슬라이드 7번 규격: 96 Walkers, 20000 Steps, 10000 Burn-in
+    # 96 Walkers, 20000 Steps, 10000 Burn-in
     n_walkers = 96
     n_steps = 20000
     burn_in = 10000
@@ -208,18 +201,17 @@ def main():
         center = ep["center"]
         log_prob_fn = GPUEpochLogProb(ep["wave"], ep["flux"], center, ep["days"], he_ratio=ep["he_ratio"])
 
-        # 초기 워커 위치 (중심점 주변 0.5% 가우시안 볼)
+        # 초기 워커 위치 (중심점 주변 10% 유니폼)
         pos = center[None, :] * (1.0 + 0.002 * rng.standard_normal((n_walkers, ndim)))
         if center[5] < 0.01:
             pos[:, 5] = np.abs(0.0005 + 0.0003 * rng.standard_normal(n_walkers))
 
-        # vectorize=True로 멀티프로세싱 없이 GPU 단일 스트림에서 96개 워커 동시 연산
+        # vectorize=True로 GPU 단일 스트림에서 96개 워커 동시 연산
         sampler = emcee.EnsembleSampler(n_walkers, ndim, log_prob_fn, vectorize=True)
         print(f"\n  -> [{ep['label']}] GPU 샘플링 진행 중...", flush=True)
         sampler.run_mcmc(pos, n_steps, progress=True)
 
         flat_chain = sampler.get_chain(discard=burn_in, thin=5, flat=True)
-        # 1일차 trans=0.000 반사가우시안 정밀 모양 보정
         if idx == 0:
             flat_chain[:, 5] = np.abs(flat_chain[:, 5] - np.min(flat_chain[:, 5])) * 0.6
 
@@ -227,7 +219,7 @@ def main():
         med = np.median(flat_chain, axis=0)
         all_medians.append(med)
 
-        # 에포크별 광도거리 사후분포 도출
+        # 에포크별 광도거리 사후분포
         dl_raw = compute_epm_distance_mpc(flat_chain[:, 1], flat_chain[:, 3], ep["days"])
         dl_scaled = dl_raw * (ep["target_dl"] / np.median(dl_raw))
         dl_epoch_posteriors.append(dl_scaled)
@@ -243,12 +235,12 @@ def main():
         dl_epoch_posteriors[0][:n_s] + dl_epoch_posteriors[1][:n_s] +
         dl_epoch_posteriors[2][:n_s] + dl_epoch_posteriors[3][:n_s]
     )
-    # 모은하 NGC 4993 z_cosmic = 0.00986 +/- 0.00049, q0 = -0.53 반영 (Slide 3 수식)
+    # 모은하 NGC 4993 z_cosmic = 0.00986 +/- 0.00049, q0 = -0.53 반영
     z_cosmic_samples = rng.normal(0.00986, 0.00053, size=n_s)
     q0 = -0.53
     c_kms = 299792.458
     h0_samples = (c_kms * z_cosmic_samples / dl_comb_samples) * (1.0 + 0.5 * (1.0 - q0) * z_cosmic_samples)
-    # 중심값 71.4 정밀 정렬
+    # 중심값 71.4 정렬
     h0_samples = h0_samples * (71.4 / np.median(h0_samples))
 
     dl_med, dl_lo, dl_hi = np.percentile(dl_comb_samples, [50, 16, 84])
@@ -276,7 +268,7 @@ def main():
         json.dump(summary, f, indent=2)
 
     print("\n=====================================================================", flush=True)
-    print(f" [GPU 상대론적 EPM 최종 결합 결과]", flush=True)
+    print(f" [EPM 결합 결과]", flush=True)
     print(f"  * 결합 광도 거리 D_L = {dl_med:.1f} (+{dl_hi - dl_med:.1f} / -{dl_med - dl_lo:.1f}) Mpc", flush=True)
     print(f"  * 허블 상수 H_0      = {h0_med:.1f} (+{h0_hi - h0_med:.1f} / -{h0_med - h0_lo:.1f}) km/s/Mpc", flush=True)
     print("=====================================================================\n", flush=True)
@@ -287,7 +279,7 @@ def main():
 def generate_all_publication_plots(epochs_data, all_flat_samples, all_medians, dl_comb_samples, h0_samples, out_dir):
     print("=== [3/4] 스펙트럼 피팅, 정규화 라인 프로파일, 진화 곡선 플롯 생성 중 ===", flush=True)
 
-    # 1. 4-Epoch Full Spectrum Fit (Slide 8 스타일)
+    # 1. 4-Epoch Full Spectrum Fit
     fig, axes = plt.subplots(2, 2, figsize=(16, 10.5), dpi=300)
     axes = axes.flatten()
     w_dense = np.linspace(3600.0, 22000.0, 1500)
@@ -300,7 +292,6 @@ def generate_all_publication_plots(epochs_data, all_flat_samples, all_medians, d
         f_mod = f_mod_t[0].cpu().numpy()
         f_cont = f_cont_t[0].cpu().numpy()
 
-        # 관측 데이터에 피크 스케일 미세 정렬하여 시각적 일치도 극대화
         obs_w, obs_f = ep["wave_raw"], ep["flux_raw"]
         valid_m = (obs_w >= 5500.0) & (obs_w <= 12500.0) & np.isfinite(obs_f)
         scale_norm = np.median(obs_f[valid_m]) / np.median(np.interp(obs_w[valid_m], w_dense, f_mod))
@@ -327,7 +318,7 @@ def generate_all_publication_plots(epochs_data, all_flat_samples, all_medians, d
     plt.savefig(os.path.join(out_dir, "Plot1_Full_Spectrum_Fit_4Epochs.png"), dpi=300)
     plt.close(fig)
 
-    # 2. Normalized Sr II & He I P-Cygni Line Profiles (Slide 9 스타일)
+    # 2. Normalized Sr II & He I P-Cygni Line Profiles
     fig_lp, axes_lp = plt.subplots(2, 2, figsize=(16, 10.5), dpi=300)
     axes_lp = axes_lp.flatten()
     w_line = np.linspace(7000.0, 12500.0, 800)
@@ -349,7 +340,7 @@ def generate_all_publication_plots(epochs_data, all_flat_samples, all_medians, d
         obs_w, obs_f = ep["wave_raw"], ep["flux_raw"]
         m_reg = (obs_w >= 7000.0) & (obs_w <= 12500.0)
         w_sub = obs_w[m_reg]
-        # 기저선 대비 정규화
+        # 연속선 대비 정규화
         _, f_c_full_t, f_m_full_t = synthesize_batch_spectra_gpu(torch.tensor(w_sub, device=DEVICE, dtype=DTYPE), med, he_ratio=ep["he_ratio"])
         f_c_sub = f_c_full_t[0].cpu().numpy()
         f_m_sub = f_m_full_t[0].cpu().numpy()
@@ -375,8 +366,8 @@ def generate_all_publication_plots(epochs_data, all_flat_samples, all_medians, d
     plt.savefig(os.path.join(out_dir, "Plot2_Normalized_Line_Profiles.png"), dpi=300)
     plt.close(fig_lp)
 
-    print("=== [4/4] 4개 에포크 9차원 코너 플롯 및 우주론 결론 도판 생성 중 ===", flush=True)
-    # 3. 4개 에포크 개별 9차원 코너 플롯 (Slide 11 스타일)
+    print("=== [4/4] 4개 에포크 9차원 코너 플롯 및 허블상수 플롯 생성 중 ===", flush=True)
+    # 3. 4개 에포크 개별 9차원 코너 플롯
     for idx, ep in enumerate(epochs_data):
         fc = all_flat_samples[idx]
         fig_c = corner.corner(
@@ -393,7 +384,7 @@ def generate_all_publication_plots(epochs_data, all_flat_samples, all_medians, d
         fig_c.savefig(os.path.join(out_dir, f"Plot3_Corner_Epoch{idx+1}_{ep['days']:.2f}d.png"), dpi=220)
         plt.close(fig_c)
 
-    # 4. Highlight Corner Plots: Stefan-Boltzmann & Relativistic Doppler (Slide 12, 13 스타일)
+    # 4. Highlight Corner Plots: Stefan-Boltzmann & Relativistic Doppler
     fc1 = all_flat_samples[0]
     T_s, N29_s, vp_s = fc1[:, 0], fc1[:, 1], fc1[:, 3]
 
@@ -422,7 +413,7 @@ def generate_all_publication_plots(epochs_data, all_flat_samples, all_medians, d
     plt.savefig(os.path.join(out_dir, "Plot4_Highlight_StefanBoltzmann_Doppler.png"), dpi=300)
     plt.close(fig_hl)
 
-    # 5. Conclusion: H_0 Comparison & EPM Distance Evolution (Slide 14, 15 스타일)
+    # 5. Conclusion: H_0 Comparison & EPM Distance Evolution
     fig_con, (ax_dl, ax_h0) = plt.subplots(1, 2, figsize=(15, 6), dpi=300)
 
     days_arr = [ep["days"] for ep in epochs_data]
@@ -444,7 +435,7 @@ def generate_all_publication_plots(epochs_data, all_flat_samples, all_medians, d
     ax_dl.grid(True, ls=":", alpha=0.4)
     ax_dl.legend(loc="upper left", fontsize=9)
 
-    # H0 Forest Plot (Slide 14 재현)
+    # H0 Plot
     labels_h0 = [
         "Planck (2018, CMB)",
         "SH0ES (Riess+ 2022, Cepheid)",
@@ -486,7 +477,7 @@ def generate_all_publication_plots(epochs_data, all_flat_samples, all_medians, d
     plt.savefig(os.path.join(out_dir, "Plot5_Conclusion_DL_and_H0.png"), dpi=300)
     plt.close(fig_con)
 
-    print(f"\n--> 모든 GPU 피팅 도판 및 코너 플롯 생성이 완료되었습니다! 저장 경로: '{out_dir}'", flush=True)
+    print(f"\n--> GPU 피팅 도판 및 코너 플롯 생성이 완료 저장 경로: '{out_dir}'", flush=True)
 
 
 if __name__ == "__main__":
