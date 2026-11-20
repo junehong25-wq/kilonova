@@ -44,7 +44,7 @@ for attr_name in dir(settings):
         target_ep = [dict(ep) for ep in val if round(float(ep["days"]), 2) == 4.40]
         if target_ep:
             new_bounds = list(target_ep[0]["bounds"])
-            new_bounds[6] = (0.040, 0.160)  # ve 상한 개방
+            new_bounds[6] = (0.015, 0.220)  # ve 상한 개방
             target_ep[0]["bounds"] = new_bounds
             setattr(settings, attr_name, target_ep)
             print(f"[설정 완료] {attr_name}에서 +4.40d 단독 실행 및 ve bounds={new_bounds[6]} 적용")
